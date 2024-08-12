@@ -110,7 +110,7 @@ position_in_partition_view get_slice_upper_bound(const schema& s, const query::p
 template <typename DataConsumeRowsContext>
 inline std::unique_ptr<DataConsumeRowsContext> data_consume_rows(const schema& s, shared_sstable sst,
         typename DataConsumeRowsContext::consumer& consumer, sstable::disk_read_range toread, uint64_t last_end,
-        std::optional<uint32_t> expected_digest) {
+        std::optional<uint32_t> expected_digest = std::nullopt) {
     // Although we were only asked to read until toread.end, we'll not limit
     // the underlying file input stream to this end, but rather to last_end.
     // This potentially enables read-ahead beyond end, until last_end, which
