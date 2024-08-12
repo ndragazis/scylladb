@@ -345,13 +345,16 @@ class compressed_file_data_source_impl : public data_source_impl {
     uint64_t _pos;
     uint64_t _beg_pos;
     uint64_t _end_pos;
+    std::optional<uint32_t> _expected_digest;
 public:
     compressed_file_data_source_impl(file f, sstables::compression* cm,
-                uint64_t pos, size_t len, file_input_stream_options options, reader_permit permit)
+                uint64_t pos, size_t len, file_input_stream_options options, reader_permit permit,
+                std::optional<uint32_t> expected_digest = std::nullopt)
             : _compression_metadata(cm)
             , _offsets(_compression_metadata->offsets.get_accessor())
             , _compression(*cm)
             , _permit(std::move(permit))
+            , _expected_digest(expected_digest)
     {
         _beg_pos = pos;
         if (pos > _compression_metadata->uncompressed_file_length()) {
@@ -455,19 +458,23 @@ template <ChecksumUtils ChecksumType>
 class compressed_file_data_source : public data_source {
 public:
     compressed_file_data_source(file f, sstables::compression* cm,
-            uint64_t offset, size_t len, file_input_stream_options options, reader_permit permit)
+            uint64_t offset, size_t len, file_input_stream_options options, reader_permit permit,
+            std::optional<uint32_t> expected_digest = std::nullopt)
         : data_source(std::make_unique<compressed_file_data_source_impl<ChecksumType>>(
-                std::move(f), cm, offset, len, std::move(options), std::move(permit)))
+                std::move(f), cm, offset, len, std::move(options), std::move(permit),
+                expected_digest))
         {}
 };
 
 template <ChecksumUtils ChecksumType>
 inline input_stream<char> make_compressed_file_input_stream(
         file f, sstables::compression *cm, uint64_t offset, size_t len,
-        file_input_stream_options options, reader_permit permit)
+        file_input_stream_options options, reader_permit permit,
+        std::optional<uint32_t> expected_digest = std::nullopt)
 {
     return input_stream<char>(compressed_file_data_source<ChecksumType>(
-            std::move(f), cm, offset, len, std::move(options), std::move(permit)));
+            std::move(f), cm, offset, len, std::move(options), std::move(permit),
+            expected_digest));
 }
 
 // For SSTables 2.x (formats 'ka' and 'la'), the full checksum is a combination of checksums of compressed chunks.
@@ -579,15 +586,18 @@ inline output_stream<char> make_compressed_file_output_stream(output_stream<char
 
 input_stream<char> sstables::make_compressed_file_k_l_format_input_stream(file f,
         sstables::compression* cm, uint64_t offset, size_t len,
-        class file_input_stream_options options, reader_permit permit)
+        class file_input_stream_options options, reader_permit permit,
+        std::optional<uint32_t> expected_digest)
 {
-    return make_compressed_file_input_stream<adler32_utils>(std::move(f), cm, offset, len, std::move(options), std::move(permit));
+    return make_compressed_file_input_stream<adler32_utils>(std::move(f), cm, offset, len, std::move(options), std::move(permit), expected_digest);
 }
 
 input_stream<char> sstables::make_compressed_file_m_format_input_stream(file f,
         sstables::compression *cm, uint64_t offset, size_t len,
-        class file_input_stream_options options, reader_permit permit) {
-    return make_compressed_file_input_stream<crc32_utils>(std::move(f), cm, offset, len, std::move(options), std::move(permit));
+        class file_input_stream_options options, reader_permit permit,
+        std::optional<uint32_t> expected_digest)
+{
+    return make_compressed_file_input_stream<crc32_utils>(std::move(f), cm, offset, len, std::move(options), std::move(permit), expected_digest);
 }
 
 output_stream<char> sstables::make_compressed_file_m_format_output_stream(output_stream<char> out,

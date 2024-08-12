@@ -2411,7 +2411,8 @@ component_type sstable::component_from_sstring(version_types v, const sstring &s
 }
 
 input_stream<char> sstable::data_stream(uint64_t pos, size_t len,
-        reader_permit permit, tracing::trace_state_ptr trace_state, lw_shared_ptr<file_input_stream_history> history, raw_stream raw) {
+        reader_permit permit, tracing::trace_state_ptr trace_state, lw_shared_ptr<file_input_stream_history> history,
+        raw_stream raw, std::optional<uint32_t> expected_digest) {
     file_input_stream_options options;
     options.buffer_size = sstable_buffer_size;
     options.read_ahead = 4;
@@ -2426,10 +2427,10 @@ input_stream<char> sstable::data_stream(uint64_t pos, size_t len,
     if (_components->compression && raw == raw_stream::no) {
         if (_version >= sstable_version_types::mc) {
              return make_compressed_file_m_format_input_stream(f, &_components->compression,
-                pos, len, std::move(options), permit);
+                pos, len, std::move(options), permit, expected_digest);
         } else {
             return make_compressed_file_k_l_format_input_stream(f, &_components->compression,
-                pos, len, std::move(options), permit);
+                pos, len, std::move(options), permit, expected_digest);
         }
     }
 
