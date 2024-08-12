@@ -18,6 +18,7 @@
 #include "../compress.hh"
 #include "compress.hh"
 #include "exceptions.hh"
+#include "sstables/checksum_utils.hh"
 #include "unimplemented.hh"
 #include "segmented_compress_params.hh"
 #include "utils/assert.hh"
@@ -346,6 +347,7 @@ class compressed_file_data_source_impl : public data_source_impl {
     uint64_t _beg_pos;
     uint64_t _end_pos;
     std::optional<uint32_t> _expected_digest;
+    uint32_t _actual_full_checksum;
 public:
     compressed_file_data_source_impl(file f, sstables::compression* cm,
                 uint64_t pos, size_t len, file_input_stream_options options, reader_permit permit,
@@ -355,10 +357,14 @@ public:
             , _compression(*cm)
             , _permit(std::move(permit))
             , _expected_digest(expected_digest)
+            , _actual_full_checksum(ChecksumType::init_checksum())
     {
         _beg_pos = pos;
         if (pos > _compression_metadata->uncompressed_file_length()) {
             throw std::runtime_error("attempt to uncompress beyond end");
+        }
+        if (_expected_digest.has_value() && (pos > 0 || len < _compression_metadata->uncompressed_file_length())) {
+            throw std::runtime_error("cannot calculate digest for partial reads");
         }
         if (len == 0 || pos == _compression_metadata->uncompressed_file_length()) {
             // Nothing to read
@@ -425,6 +431,14 @@ public:
                 out.trim_front(addr.offset);
                 _pos += out.size();
                 _underlying_pos += addr.chunk_len;
+
+                if (_expected_digest.has_value()) {
+                    _actual_full_checksum = checksum_combine_or_feed<ChecksumType>(_actual_full_checksum, actual_checksum, buf.get(), compressed_len);
+                    if (_pos >= _end_pos && _actual_full_checksum != _expected_digest.value()) {
+                        throw sstables::malformed_sstable_exception(
+                            format("Full checksum mismatch: expected={}, actual={}", _expected_digest.value(), _actual_full_checksum));
+                    }
+                }
 
                 return make_tracked_temporary_buffer(std::move(out), std::move(res_units));
             });
