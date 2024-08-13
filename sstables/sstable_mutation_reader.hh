@@ -94,8 +94,8 @@ position_in_partition_view get_slice_upper_bound(const schema& s, const query::p
 // progress (i.e., returned a future which hasn't completed yet).
 //
 // The "toread" range specifies the range we want to read initially.
-// However, the object returned by the read, a data_consume_context, also
-// provides a fast_forward_to(start,end) method which allows resetting
+// However, the object returned by the read, a context object, also
+// provides a fast_forward_to(begin, end) method which allows resetting
 // the reader to a new range. To allow that, we also have a "last_end"
 // byte which should be the last end to which fast_forward_to is
 // eventually allowed. If last_end==end, fast_forward_to is not allowed

@@ -91,10 +91,6 @@ concept ConsumeRowsContext =
         { c.close() } -> std::same_as<future<>>;
     };
 
-template <typename DataConsumeRowsContext>
-requires ConsumeRowsContext<DataConsumeRowsContext>
-class data_consume_context;
-
 class index_reader;
 class partition_index_cache;
 class sstables_manager;
