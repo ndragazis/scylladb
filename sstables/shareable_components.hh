@@ -22,6 +22,7 @@ struct shareable_components {
     sstables::summary summary;
     sstables::statistics statistics;
     std::optional<sstables::scylla_metadata> scylla_metadata;
+    std::optional<sstables::checksum> checksum;
 };
 
 }   // namespace sstables
