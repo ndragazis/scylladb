@@ -2565,10 +2565,17 @@ future<uint32_t> sstable::read_digest() {
     co_return boost::lexical_cast<uint32_t>(digest_str);
 }
 
-future<checksum> sstable::read_checksum() {
-    sstables::checksum checksum;
-
+future<> sstable::read_checksum() {
+    if (_components->checksum) {
+        return make_ready_future<>();
+    }
+    co_await read_toc();
+    _components->checksum.emplace();  // engaged optional means we won't try to re-read this again
+    if (!has_component(component_type::CRC)) {
+        co_return make_ready_future<>();
+    }
     co_await do_read_simple(component_type::CRC, [&] (version_types v, file crc_file) -> future<> {
+        using checksum _components->checksum.value();
         file_input_stream_options options;
         options.buffer_size = 4096;
 
@@ -2597,7 +2604,7 @@ future<checksum> sstable::read_checksum() {
         maybe_rethrow_exception(std::move(ex));
     });
 
-    co_return checksum;
+    co_return;
 }
 
 future<bool> validate_checksums(shared_sstable sst, reader_permit permit) {
@@ -2616,7 +2623,8 @@ future<bool> validate_checksums(shared_sstable sst, reader_permit permit) {
                 valid = co_await do_validate_compressed<adler32_utils>(data_stream, sst->get_compression(), false, digest);
             }
         } else {
-            auto checksum = co_await sst->read_checksum();
+            co_await sst->read_checksum();
+            const auto& checksum = sst->get_checksum();
             if (sst->get_version() >= sstable_version_types::mc) {
                 valid = co_await do_validate_uncompressed<crc32_utils>(data_stream, checksum, digest);
             } else {
