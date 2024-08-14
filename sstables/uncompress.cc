@@ -14,19 +14,21 @@
 
 #include "types.hh"
 #include "exceptions.hh"
+#include "checksum_utils.hh"
 
 namespace sstables {
 
 // File data source implementation for uncompressed SSTables
+template <ChecksumUtils ChecksumType>
 class uncompressed_file_data_source_impl : public data_source_impl {
     std::optional<input_stream<char>> _input_stream;
-    checksum& _checksum;
+    const checksum& _checksum;
     uint64_t _underlying_pos;
     uint64_t _pos;
     uint64_t _beg_pos;
     uint64_t _end_pos;
 public:
-    uncompressed_file_data_source_impl(file f, checksum& checksum,
+    uncompressed_file_data_source_impl(file f, const checksum& checksum,
     uint64_t pos, size_t len, file_input_stream_options options)
     : _checksum(checksum)
     , _pos(pos)
@@ -62,6 +64,11 @@ public:
             if (buf.size() != chunk_size) {
                 throw sstables::malformed_sstable_exception(format("uncompressed reader hit premature end-of-file at file offset {}, expected chunk_len={}, actual={}", _underlying_pos, chunk_size, buf.size()));
             }
+            auto expected_checksum = _checksum.checksums[_pos / chunk_size];
+            auto actual_checksum = ChecksumType::checksum(buf.get(), chunk_size);
+            if (expected_checksum != actual_checksum) {
+                throw sstables::malformed_sstable_exception(format("uncompressed chunk of size {} at file offset {} failed checksum, expected={}, actual={}", chunk_size, _underlying_pos, expected_checksum, actual_checksum));
+            }
             buf.trim_front(_pos % chunk_size);
             _pos += buf.size();
             _underlying_pos += chunk_size;
@@ -91,21 +98,37 @@ public:
     }
 };
 
+template <ChecksumUtils ChecksumType>
 class uncompressed_file_data_source : public data_source {
 public:
-    uncompressed_file_data_source(file f, checksum& checksum, uint64_t offset,
+    uncompressed_file_data_source(file f, const checksum& checksum, uint64_t offset,
     size_t len, file_input_stream_options options)
-    : data_source(std::make_unique<uncompressed_file_data_source_impl>(
+    : data_source(std::make_unique<uncompressed_file_data_source_impl<ChecksumType>>(
         std::move(f), checksum, offset, len, std::move(options)))
     {}
 };
 
+template <ChecksumUtils ChecksumType>
 inline input_stream<char> make_uncompressed_file_input_stream(
-    file f, checksum& checksum, uint64_t offset, size_t len,
+    file f, const checksum& checksum, uint64_t offset, size_t len,
     file_input_stream_options options)
 {
-    return input_stream<char>(uncompressed_file_data_source(
+    return input_stream<char>(uncompressed_file_data_source<ChecksumType>(
         std::move(f), checksum, offset, len, std::move(options)));
+}
+
+input_stream<char> make_uncompressed_file_k_l_format_input_stream(
+    file f, const checksum& checksum, uint64_t offset, size_t len,
+    file_input_stream_options options)
+{
+    return make_uncompressed_file_input_stream<adler32_utils>(std::move(f), checksum, offset, len, std::move(options));
+}
+
+input_stream<char> make_uncompressed_file_m_format_input_stream(
+    file f, const checksum& checksum, uint64_t offset, size_t len,
+    file_input_stream_options options)
+{
+    return make_uncompressed_file_input_stream<crc32_utils>(std::move(f), checksum, offset, len, std::move(options));
 }
 
 }

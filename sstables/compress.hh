@@ -381,3 +381,11 @@ output_stream<char> make_compressed_file_m_format_output_stream(output_stream<ch
 
 }
 
+
+input_stream<char> make_uncompressed_file_k_l_format_input_stream(file f,
+                const sstables::checksum& checksum, uint64_t offset, size_t len,
+                class file_input_stream_options options);
+
+input_stream<char> make_uncompressed_file_m_format_input_stream(file f,
+                const sstables::checksum& checksum, uint64_t offset, size_t len,
+                class file_input_stream_options options);
