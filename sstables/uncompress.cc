@@ -9,20 +9,28 @@
 #include <cstdint>
 #include <seastar/core/fstream.hh>
 
+#include "seastar/core/future.hh"
+#include "types.hh"
 #include "reader_permit.hh"
 #include "seastar/core/temporary_buffer.hh"
 
+namespace sstables {
+
 class uncompressed_file_data_source_impl : public data_source_impl {
     std::optional<input_stream<char>> _input_stream;
+    checksum& _checksum;
     reader_permit _permit;
     uint64_t _underlying_pos;
     uint64_t _pos;
+    //FIXME: Do we actually need this data member?
     uint64_t _beg_pos;
     uint64_t _end_pos;
 public:
-    uncompressed_file_data_source_impl(file f, uint64_t pos, size_t len,
-    file_input_stream_options options, reader_permit permit)
+    uncompressed_file_data_source_impl(file f, checksum& checksum,
+    uint64_t pos, size_t len, file_input_stream_options options,
+    reader_permit permit)
     : _input_stream(make_file_input_stream(std::move(f), pos, len, std::move(options)))
+    , _checksum(checksum)
     , _permit(std::move(permit))
     , _underlying_pos(pos)
     , _pos(pos)
@@ -31,26 +39,53 @@ public:
     {}
 
     virtual future<temporary_buffer<char>> get() override {
-        return _input_stream->read_exactly(42).then([this, addr](temporary_buffer<char> buf) {
+        if (_pos >= _end_pos) {
+            return make_ready_future<temporary_buffer<char>>();
+        }
+        //FIXME:
+        //What if the _pos is not aligned at the chunk size?
+        //What about the permit? How should I update it?
+        return _input_stream->read_exactly(_checksum.chunk_size).then([this](temporary_buffer<char> buf) {
             _pos += buf.size();
             return make_tracked_temporary_buffer(std::move(buf), std::move(res_units));
+        });
+    }
+
+    virtual future<> close() override {
+        if (!_input_stream) {
+            return make_ready_future<>();
+        }
+        return _input_stream->close();
+    }
+
+    virtual future<temporary_buffer<char>> skip(uint64_t n) override {
+        _pos += n;
+        SCYLLA_ASSERT(_pos <= _end_pos);
+        if (_pos == _end_pos) {
+            return make_ready_future<temporary_buffer<char>>();
+        }
+        _beg_pos = _pos;
+        return _input_stream->skip(n).then([] {
+            return make_ready_future<temporary_buffer<char>>();
         });
     }
 };
 
 class uncompressed_file_data_source : public data_source {
 public:
-    uncompressed_file_data_source(file f, uint64_t offset, size_t len,
-    file_input_stream_options options, reader_permit permit)
+    uncompressed_file_data_source(file f, checksum& checksum, uint64_t offset,
+    size_t len, file_input_stream_options options, reader_permit permit)
     : data_source(std::make_unique<uncompressed_file_data_source_impl>(
-        std::move(f), offset, len, std::move(options), std::move(permit)))
+        std::move(f), checksum, offset, len, std::move(options), std::move(permit)))
     {}
 };
 
 inline input_stream<char> make_uncompressed_file_input_stream(
-    file f, uint64_t offset, size_t len, file_input_stream_options options,
-    reader_permit permit)
+    file f, checksum& checksum, uint64_t offset, size_t len,
+    file_input_stream_options options, reader_permit permit)
 {
     return input_stream<char>(uncompressed_file_data_source(
-        std::move(f), offset, len, std::move(options), std::move(permit)));
+        std::move(f), checksum, offset, len, std::move(options), std::move(permit)));
+}
+
 }
