@@ -111,3 +111,11 @@ public:
 private:
     void validate_options(const std::map<sstring, sstring>&);
 };
+
+// For SSTables 2.x (formats 'ka' and 'la'), the full checksum is a combination of checksums of compressed chunks.
+// For SSTables 3.x (format 'mc'), however, it is supposed to contain the full checksum of the file written so
+// the per-chunk checksums also count.
+enum class compressed_checksum_mode {
+    checksum_chunks_only,
+    checksum_all,
+};

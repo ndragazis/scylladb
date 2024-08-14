@@ -2446,7 +2446,7 @@ future<temporary_buffer<char>> sstable::data_read(uint64_t pos, size_t len, read
 }
 
 template <typename ChecksumType>
-static future<bool> do_validate_compressed(input_stream<char>& stream, const sstables::compression& c, bool checksum_all, uint32_t expected_digest) {
+static future<bool> do_validate_compressed(input_stream<char>& stream, const sstables::compression& c, compressed_checksum_mode checksum_mode, uint32_t expected_digest) {
     bool valid = true;
     uint64_t offset = 0;
     uint32_t actual_full_checksum = ChecksumType::init_checksum();
@@ -2479,7 +2479,7 @@ static future<bool> do_validate_compressed(input_stream<char>& stream, const sst
         }
 
         actual_full_checksum = checksum_combine_or_feed<ChecksumType>(actual_full_checksum, actual_checksum, buf.get(), compressed_len);
-        if (checksum_all) {
+        if (checksum_mode == compressed_checksum_mode::checksum_all) {
             uint32_t be_actual_checksum = cpu_to_be(actual_checksum);
             actual_full_checksum = ChecksumType::checksum(actual_full_checksum,
                     reinterpret_cast<const char*>(&be_actual_checksum), sizeof(be_actual_checksum));
@@ -2612,9 +2612,9 @@ future<bool> validate_checksums(shared_sstable sst, reader_permit permit) {
     try {
         if (sst->get_compression()) {
             if (sst->get_version() >= sstable_version_types::mc) {
-                valid = co_await do_validate_compressed<crc32_utils>(data_stream, sst->get_compression(), true, digest);
+                valid = co_await do_validate_compressed<crc32_utils>(data_stream, sst->get_compression(), compressed_checksum_mode::checksum_all, digest);
             } else {
-                valid = co_await do_validate_compressed<adler32_utils>(data_stream, sst->get_compression(), false, digest);
+                valid = co_await do_validate_compressed<adler32_utils>(data_stream, sst->get_compression(), compressed_checksum_mode::checksum_chunks_only, digest);
             }
         } else {
             auto checksum = co_await sst->read_checksum();

@@ -491,14 +491,6 @@ inline input_stream<char> make_compressed_file_input_stream(
             expected_digest));
 }
 
-// For SSTables 2.x (formats 'ka' and 'la'), the full checksum is a combination of checksums of compressed chunks.
-// For SSTables 3.x (format 'mc'), however, it is supposed to contain the full checksum of the file written so
-// the per-chunk checksums also count.
-enum class compressed_checksum_mode {
-    checksum_chunks_only,
-    checksum_all,
-};
-
 // compressed_file_data_sink_impl works as a filter for a file output stream,
 // where the buffer flushed will be compressed and its checksum computed, then
 // the result passed to a regular output stream.
