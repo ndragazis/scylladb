@@ -52,8 +52,11 @@ public:
         if (_pos >= _end_pos) {
             return make_ready_future<temporary_buffer<char>>();
         }
-        //FIXME:
-        //Do I need the check for the out-of-sync reader?
+        // Read the next chunk. We need to skip part of the first
+        // chunk, but then continue to read from beginning of chunks.
+        if (_pos != _beg_pos && (_pos / chunk_size) != 0) {
+            throw std::runtime_error("uncompressed reader out of sync");
+        }
         return _input_stream->read_exactly(chunk_size).then([this, chunk_size](temporary_buffer<char> buf) {
             if (buf.size() != chunk_size) {
                 throw sstables::malformed_sstable_exception(format("uncompressed reader hit premature end-of-file at file offset {}, expected chunk_len={}, actual={}", _underlying_pos, chunk_size, buf.size()));
