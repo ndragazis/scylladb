@@ -2624,11 +2624,12 @@ future<bool> validate_checksums(shared_sstable sst, reader_permit permit) {
             }
         } else {
             co_await sst->read_checksum();
-            const auto& checksum = sst->get_checksum();
+            const auto checksum = sst->get_checksum();
+            SCYLLA_ASSERT(checksum != nullptr);
             if (sst->get_version() >= sstable_version_types::mc) {
-                valid = co_await do_validate_uncompressed<crc32_utils>(data_stream, checksum, digest);
+                valid = co_await do_validate_uncompressed<crc32_utils>(data_stream, *checksum, digest);
             } else {
-                valid = co_await do_validate_uncompressed<adler32_utils>(data_stream, checksum, digest);
+                valid = co_await do_validate_uncompressed<adler32_utils>(data_stream, *checksum, digest);
             }
         }
     } catch (...) {
