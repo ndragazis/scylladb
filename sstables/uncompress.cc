@@ -57,17 +57,16 @@ public:
         }
         // Read the next chunk. We need to skip part of the first
         // chunk, but then continue to read from beginning of chunks.
+        // Also, we need to take into account that the last chunk can
+        // be smaller than `chunk_size'.
         if (_pos != _beg_pos && (_pos % chunk_size) != 0) {
             throw std::runtime_error("uncompressed reader out of sync");
         }
         return _input_stream->read_exactly(chunk_size).then([this, chunk_size](temporary_buffer<char> buf) {
-            if (buf.size() != chunk_size) {
-                throw sstables::malformed_sstable_exception(format("uncompressed reader hit premature end-of-file at file offset {}, expected chunk_len={}, actual={}", _underlying_pos, chunk_size, buf.size()));
-            }
             auto expected_checksum = _checksum.checksums[_pos / chunk_size];
-            auto actual_checksum = ChecksumType::checksum(buf.get(), chunk_size);
+            auto actual_checksum = ChecksumType::checksum(buf.get(), buf.size());
             if (expected_checksum != actual_checksum) {
-                throw sstables::malformed_sstable_exception(format("uncompressed chunk of size {} at file offset {} failed checksum, expected={}, actual={}", chunk_size, _underlying_pos, expected_checksum, actual_checksum));
+                throw sstables::malformed_sstable_exception(format("uncompressed chunk of size {} at file offset {} failed checksum, expected={}, actual={}", buf.size(), _underlying_pos, expected_checksum, actual_checksum));
             }
             buf.trim_front(_pos % chunk_size);
             _pos += buf.size();
