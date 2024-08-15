@@ -924,8 +924,8 @@ public:
         return _components->summary;
     }
 
-    const checksum& get_checksum() const {
-        return _components->checksum.value();
+    const checksum* get_checksum() const {
+        return _components->checksum ? &*_components->checksum : nullptr;
     }
 
     // Gets ratio of droppable tombstone. A tombstone is considered droppable here
