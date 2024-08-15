@@ -2,6 +2,7 @@ add_library(sstables STATIC)
 target_sources(sstables
   PRIVATE
     compress.cc
+    uncompress.cc
     integrity_checked_file_impl.cc
     kl/reader.cc
     metadata_collector.cc
