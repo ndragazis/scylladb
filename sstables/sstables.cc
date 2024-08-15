@@ -2567,15 +2567,15 @@ future<uint32_t> sstable::read_digest() {
 
 future<> sstable::read_checksum() {
     if (_components->checksum) {
-        return make_ready_future<>();
+        co_return;
     }
     co_await read_toc();
     _components->checksum.emplace();  // engaged optional means we won't try to re-read this again
     if (!has_component(component_type::CRC)) {
-        co_return make_ready_future<>();
+        co_return;
     }
-    co_await do_read_simple(component_type::CRC, [&] (version_types v, file crc_file) -> future<> {
-        using checksum _components->checksum.value();
+    auto& checksum = _components->checksum.value();
+    co_await do_read_simple(component_type::CRC, [&checksum] (version_types v, file crc_file) -> future<> {
         file_input_stream_options options;
         options.buffer_size = 4096;
 
