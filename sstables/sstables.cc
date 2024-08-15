@@ -2432,7 +2432,8 @@ input_stream<char> sstable::data_stream(uint64_t pos, size_t len,
             return make_compressed_file_k_l_format_input_stream(f, &_components->compression,
                 pos, len, std::move(options), permit);
         }
-    } else if (!_components->compression) {
+    }
+    if (_components->checksum.has_value()) {
         auto checksum = get_checksum();
         SCYLLA_ASSERT(checksum != nullptr);
         if (_version >= sstable_version_types::mc) {
@@ -2442,9 +2443,8 @@ input_stream<char> sstable::data_stream(uint64_t pos, size_t len,
             return make_uncompressed_file_k_l_format_input_stream(f, *checksum,
                 pos, len, std::move(options));
         }
-    } else {
-        return make_file_input_stream(f, pos, len, std::move(options));
     }
+    return make_file_input_stream(f, pos, len, std::move(options));
 }
 
 future<temporary_buffer<char>> sstable::data_read(uint64_t pos, size_t len, reader_permit permit) {
