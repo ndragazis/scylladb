@@ -55,7 +55,7 @@ public:
         }
         // Read the next chunk. We need to skip part of the first
         // chunk, but then continue to read from beginning of chunks.
-        if (_pos != _beg_pos && (_pos / chunk_size) != 0) {
+        if (_pos != _beg_pos && (_pos % chunk_size) != 0) {
             throw std::runtime_error("uncompressed reader out of sync");
         }
         return _input_stream->read_exactly(chunk_size).then([this, chunk_size](temporary_buffer<char> buf) {
