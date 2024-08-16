@@ -41,6 +41,7 @@ public:
         // range. The _underlying_pos always points to the current
         // chunk-aligned position of the file input stream.
         auto chunk_size = checksum.chunk_size;
+        SCYLLA_ASSERT(chunk_size);
         auto start = (_beg_pos / chunk_size) * chunk_size;
         auto end = (_end_pos / chunk_size + 1) * chunk_size;
         _input_stream = make_file_input_stream(std::move(f), start, end - start, std::move(options));
