@@ -2433,7 +2433,7 @@ input_stream<char> sstable::data_stream(uint64_t pos, size_t len,
                 pos, len, std::move(options), permit);
         }
     }
-    if (_components->checksum.has_value()) {
+    if (_components->checksum && raw == raw_stream::no) {
         auto checksum = get_checksum();
         SCYLLA_ASSERT(checksum != nullptr);
         if (_version >= sstable_version_types::mc) {
