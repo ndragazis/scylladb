@@ -2570,12 +2570,12 @@ future<> sstable::read_checksum() {
         co_return;
     }
     co_await read_toc();
-    _components->checksum.emplace();  // engaged optional means we won't try to re-read this again
     if (!has_component(component_type::CRC)) {
         co_return;
     }
-    auto& checksum = _components->checksum.value();
-    co_await do_read_simple(component_type::CRC, [&checksum] (version_types v, file crc_file) -> future<> {
+    _components->checksum.emplace();  // engaged optional means we won't try to re-read this again
+    co_await do_read_simple(component_type::CRC, [this] (version_types v, file crc_file) -> future<> {
+        auto& checksum = _components->checksum.value();
         file_input_stream_options options;
         options.buffer_size = 4096;
 
@@ -2598,6 +2598,7 @@ future<> sstable::read_checksum() {
             }
         } catch (...) {
             ex = std::current_exception();
+            _components->checksum.reset();
         }
 
         co_await crc_stream.close();
