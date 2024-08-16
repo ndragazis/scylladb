@@ -2514,13 +2514,7 @@ static future<bool> do_validate_uncompressed(input_stream<char>& stream, const c
 
     for (size_t i = 0; i < checksum.checksums.size(); ++i) {
         const auto expected_checksum = checksum.checksums[i];
-        temporary_buffer<char> buf;
-        try {
-            buf = co_await stream.read_exactly(checksum.chunk_size);
-        } catch (const malformed_sstable_exception& e) {
-            sstlog.error("Failed to read chunk #{} of size {} at offset {}: {}", i, checksum.chunk_size, offset, e.what());
-            valid = false;
-        }
+        auto buf = co_await stream.read_exactly(checksum.chunk_size);
 
         if (buf.empty()) {
             sstlog.error("Chunk count mismatch between CRC.db and Data.db at offset {}: expected {} chunks but data file has less", offset, checksum.checksums.size());
@@ -2543,13 +2537,7 @@ static future<bool> do_validate_uncompressed(input_stream<char>& stream, const c
     {
         // We should be at EOF here, but the flag might not be set yet. To ensure
         // it is set, try to read some more. This should return an empty buffer.
-        temporary_buffer<char> buf;
-        try {
-            buf = co_await stream.read();
-        } catch (const malformed_sstable_exception& e) {
-            sstlog.error("Failed to read data at offset {}: {}", offset, e.what());
-            valid = false;
-        }
+        auto buf = co_await stream.read();
         if (!buf.empty()) {
             sstlog.error("Chunk count mismatch between CRC.db and Data.db at offset {}: expected {} chunks but data file has more", offset, checksum.checksums.size());
             valid = false;
