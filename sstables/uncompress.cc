@@ -91,6 +91,7 @@ public:
         }
         auto underlying_n = (_pos / chunk_size) * chunk_size - _underlying_pos;
         _beg_pos = _pos;
+        _underlying_pos += underlying_n;
         return _input_stream->skip(underlying_n).then([] {
             return make_ready_future<temporary_buffer<char>>();
         });
