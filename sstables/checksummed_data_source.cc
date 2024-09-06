@@ -16,6 +16,7 @@
 #include "types.hh"
 #include "exceptions.hh"
 #include "checksum_utils.hh"
+#include "digest_validation_result.hh"
 
 namespace sstables {
 
@@ -27,7 +28,11 @@ template <ChecksumUtils ChecksumType>
 class checksummed_file_data_source_impl : public data_source_impl {
     std::optional<input_stream<char>> _input_stream;
     const checksum& _checksum;
+    std::optional<const uint32_t> _expected_digest;
+    uint32_t _actual_digest;
+    digest_validation_result* _digest_result;
     uint64_t _chunk_size_trailing_zeros;
+    uint64_t _file_len;
     uint64_t _underlying_pos;
     uint64_t _pos;
     uint64_t _beg_pos;
@@ -35,8 +40,14 @@ class checksummed_file_data_source_impl : public data_source_impl {
 public:
     checksummed_file_data_source_impl(file f, uint64_t file_len,
                 const checksum& checksum, uint64_t pos, size_t len,
-                file_input_stream_options options)
+                file_input_stream_options options,
+                std::optional<uint32_t> digest,
+                digest_validation_result* digest_result)
             : _checksum(checksum)
+            , _expected_digest(digest)
+            , _actual_digest(ChecksumType::init_checksum())
+            , _digest_result(digest_result)
+            , _file_len(file_len)
             , _pos(pos)
             , _beg_pos(pos)
             , _end_pos(pos + len)
@@ -53,17 +64,28 @@ public:
             on_internal_error(sstlog, format("Invalid chunk size: {}", chunk_size));
         }
         _chunk_size_trailing_zeros = count_trailing_zeros(chunk_size);
-        if (_pos > file_len) {
+        if (_pos > _file_len) {
             on_internal_error(sstlog, "attempt to read beyond end");
         }
-        if (len == 0 || _pos == file_len) {
+        if (len == 0 || _pos == _file_len) {
             // Nothing to read
             _end_pos = _pos;
             return;
         }
-        if (len > file_len - _pos) {
-            _end_pos = file_len;
+        if (len > _file_len - _pos) {
+            _end_pos = _file_len;
         }
+        if (_expected_digest) {
+            if (_end_pos - _pos < _file_len) {
+                on_internal_error(sstlog,
+                        format("Cannot check digest with a partial read: current pos={}, end pos={}, file len={}",
+                            _pos, _end_pos, _file_len));
+            }
+            if (!_digest_result) {
+                on_internal_error(sstlog, "Requested digest check but no output parameter was provided.");
+            }
+        }
+        *_digest_result = {digest_validation_status::in_progress, std::nullopt};
         auto start = _beg_pos & ~(chunk_size - 1);
         auto end = (_end_pos & ~(chunk_size - 1)) + chunk_size;
         _input_stream = make_file_input_stream(std::move(f), start, end - start, std::move(options));
@@ -88,9 +110,23 @@ public:
             if (expected_checksum != actual_checksum) {
                 throw sstables::malformed_sstable_exception(format("Checksummed chunk of size {} at file offset {} failed checksum: expected={}, actual={}", buf.size(), _underlying_pos, expected_checksum, actual_checksum));
             }
+
+            if (_expected_digest) {
+                _actual_digest = checksum_combine_or_feed<ChecksumType>(_actual_digest, actual_checksum, buf.begin(), buf.size());
+            }
+
             buf.trim_front(_pos & (chunk_size - 1));
             _pos += buf.size();
             _underlying_pos += chunk_size;
+
+            if (_pos == _file_len && _expected_digest) {
+                if (*_expected_digest != _actual_digest) {
+                    sstring msg = format("Digest mismatch: expected={}, actual={}", *_expected_digest, _actual_digest);
+                    *_digest_result = {digest_validation_status::invalid, msg};
+                } else {
+                    *_digest_result = {digest_validation_status::valid, std::nullopt};
+                }
+            }
             return buf;
         });
     }
@@ -103,6 +139,9 @@ public:
     }
 
     virtual future<temporary_buffer<char>> skip(uint64_t n) override {
+        if (_expected_digest) {
+            on_internal_error(sstlog, "Tried to skip on a data source for which digest check has been requested.");
+        }
         auto chunk_size = _checksum.chunk_size;
         if (_pos + n > _end_pos) {
             on_internal_error(sstlog, format("Skipping over the end position is disallowed: current pos={}, end pos={}, skip len={}", _pos, _end_pos, n));
@@ -124,33 +163,40 @@ template <ChecksumUtils ChecksumType>
 class checksummed_file_data_source : public data_source {
 public:
     checksummed_file_data_source(file f, uint64_t file_len, const checksum& checksum,
-            uint64_t offset, size_t len, file_input_stream_options options)
+            uint64_t offset, size_t len, file_input_stream_options options,
+            std::optional<uint32_t> digest, digest_validation_result* digest_result)
         : data_source(std::make_unique<checksummed_file_data_source_impl<ChecksumType>>(
-                std::move(f), file_len, checksum, offset, len, std::move(options)))
+                std::move(f), file_len, checksum, offset, len, std::move(options),
+                digest, digest_result))
     {}
 };
 
 template <ChecksumUtils ChecksumType>
 inline input_stream<char> make_checksummed_file_input_stream(
         file f, uint64_t file_len, const checksum& checksum, uint64_t offset,
-        size_t len, file_input_stream_options options)
+        size_t len, file_input_stream_options options,
+        std::optional<uint32_t> digest, digest_validation_result* digest_result)
 {
     return input_stream<char>(checksummed_file_data_source<ChecksumType>(
-        std::move(f), file_len, checksum, offset, len, std::move(options)));
+        std::move(f), file_len, checksum, offset, len, std::move(options), digest, digest_result));
 }
 
 input_stream<char> make_checksummed_file_k_l_format_input_stream(
         file f, uint64_t file_len, const checksum& checksum, uint64_t offset,
-        size_t len, file_input_stream_options options)
+        size_t len, file_input_stream_options options,
+        std::optional<uint32_t> digest, digest_validation_result* digest_result)
 {
-    return make_checksummed_file_input_stream<adler32_utils>(std::move(f), file_len, checksum, offset, len, std::move(options));
+    return make_checksummed_file_input_stream<adler32_utils>(std::move(f), file_len,
+            checksum, offset, len, std::move(options), digest, digest_result);
 }
 
 input_stream<char> make_checksummed_file_m_format_input_stream(
         file f, uint64_t file_len, const checksum& checksum, uint64_t offset,
-        size_t len, file_input_stream_options options)
+        size_t len, file_input_stream_options options,
+        std::optional<uint32_t> digest, digest_validation_result* digest_result)
 {
-    return make_checksummed_file_input_stream<crc32_utils>(std::move(f), file_len, checksum, offset, len, std::move(options));
+    return make_checksummed_file_input_stream<crc32_utils>(std::move(f), file_len,
+            checksum, offset, len, std::move(options), digest, digest_result);
 }
 
 }
