@@ -13,6 +13,7 @@
 #include <seastar/core/align.hh>
 #include <seastar/core/aligned_buffer.hh>
 #include <seastar/util/closeable.hh>
+#include <seastar/util/short_streams.hh>
 #include <seastar/core/coroutine.hh>
 
 #include "sstables/generation_type.hh"
@@ -2164,6 +2165,45 @@ SEASTAR_THREAD_TEST_CASE(sstable_scrub_validate_mode_test_corrupted_file) {
     });
 }
 
+SEASTAR_THREAD_TEST_CASE(sstable_scrub_validate_mode_test_corrupted_file_digest) {
+    scrub_test_framework test(compress_sstable::yes);
+
+    auto schema = test.schema();
+
+    auto muts = tests::generate_random_mutations(
+            test.random_schema(),
+            tests::uncompactible_timestamp_generator(test.seed()),
+            tests::no_expiry_expiry_generator(),
+            std::uniform_int_distribution<size_t>(10, 10)).get();
+
+    test.run(schema, muts, [] (table_for_tests& table, compaction::table_state& ts, std::vector<sstables::shared_sstable> sstables) {
+        BOOST_REQUIRE(sstables.size() == 1);
+        auto sst = sstables.front();
+
+        // This test is about corrupted data with valid per-chunk checksums.
+        // This kind of corruption should be detected by the digest check.
+        // Since creating this kind of corruption is hard, we go the other way
+        // around here and we corrupt the Digest file instead.
+        auto f = open_file_dma(sstables::test(sst).filename(component_type::Digest).native(), open_flags::rw).get();
+        auto stream = make_file_input_stream(f);
+        auto digest_str = util::read_entire_stream_contiguous(stream).get();
+        auto digest = boost::lexical_cast<uint32_t>(digest_str);
+        auto new_digest = to_sstring<bytes>(digest + 1); // a random invalid digest
+        f.dma_write(0, new_digest.c_str(), new_digest.size()).get();
+        f.close().get();
+
+        sstables::compaction_type_options::scrub opts = {
+            .operation_mode = sstables::compaction_type_options::scrub::mode::validate,
+        };
+        auto stats = table->get_compaction_manager().perform_sstable_scrub(ts, opts, tasks::task_info{}).get();
+
+        BOOST_REQUIRE(stats.has_value());
+        BOOST_REQUIRE_GT(stats->validation_errors, 0);
+        BOOST_REQUIRE(sst->is_quarantined());
+        BOOST_REQUIRE(in_strategy_sstables(ts).empty());
+    });
+}
+
 SEASTAR_THREAD_TEST_CASE(sstable_scrub_validate_mode_test_valid_sstable) {
     scrub_test_framework test(compress_sstable::yes);
 
@@ -2238,6 +2278,45 @@ SEASTAR_THREAD_TEST_CASE(sstable_scrub_validate_mode_test_corrupted_file_uncompr
         auto wbuf = seastar::temporary_buffer<char>::aligned(wbuf_align, wbuf_len);
         std::fill(wbuf.get_write(), wbuf.get_write() + wbuf_len, 0xba);
         f.dma_write(0, wbuf.get(), wbuf_len).get();
+        f.close().get();
+
+        sstables::compaction_type_options::scrub opts = {
+            .operation_mode = sstables::compaction_type_options::scrub::mode::validate,
+        };
+        auto stats = table->get_compaction_manager().perform_sstable_scrub(ts, opts, tasks::task_info{}).get();
+
+        BOOST_REQUIRE(stats.has_value());
+        BOOST_REQUIRE_GT(stats->validation_errors, 0);
+        BOOST_REQUIRE(sst->is_quarantined());
+        BOOST_REQUIRE(in_strategy_sstables(ts).empty());
+    });
+}
+
+SEASTAR_THREAD_TEST_CASE(sstable_scrub_validate_mode_test_corrupted_file_digest_uncompressed) {
+    scrub_test_framework test(compress_sstable::no);
+
+    auto schema = test.schema();
+
+    auto muts = tests::generate_random_mutations(
+            test.random_schema(),
+            tests::uncompactible_timestamp_generator(test.seed()),
+            tests::no_expiry_expiry_generator(),
+            std::uniform_int_distribution<size_t>(10, 10)).get();
+
+    test.run(schema, muts, [] (table_for_tests& table, compaction::table_state& ts, std::vector<sstables::shared_sstable> sstables) {
+        BOOST_REQUIRE(sstables.size() == 1);
+        auto sst = sstables.front();
+
+        // This test is about corrupted data with valid per-chunk checksums.
+        // This kind of corruption should be detected by the digest check.
+        // Since creating this kind of corruption is hard, we go the other way
+        // around here and we corrupt the Digest file instead.
+        auto f = open_file_dma(sstables::test(sst).filename(component_type::Digest).native(), open_flags::rw).get();
+        auto stream = make_file_input_stream(f);
+        auto digest_str = util::read_entire_stream_contiguous(stream).get();
+        auto digest = boost::lexical_cast<uint32_t>(digest_str);
+        auto new_digest = to_sstring<bytes>(digest + 1); // a random invalid digest
+        f.dma_write(0, new_digest.c_str(), new_digest.size()).get();
         f.close().get();
 
         sstables::compaction_type_options::scrub opts = {
