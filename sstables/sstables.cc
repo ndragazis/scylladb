@@ -2437,7 +2437,7 @@ component_type sstable::component_from_sstring(version_types v, const sstring &s
 
 input_stream<char> sstable::data_stream(uint64_t pos, size_t len,
         reader_permit permit, tracing::trace_state_ptr trace_state, lw_shared_ptr<file_input_stream_history> history, raw_stream raw,
-        integrity_check integrity) {
+        integrity_check integrity, digest_validation_result* digest_result) {
     file_input_stream_options options;
     options.buffer_size = sstable_buffer_size;
     options.read_ahead = 4;
@@ -2448,15 +2448,18 @@ input_stream<char> sstable::data_stream(uint64_t pos, size_t len,
         f = tracing::make_traced_file(std::move(f), std::move(trace_state), format("{}:", get_filename()));
     }
 
+    std::optional<uint32_t> digest = std::nullopt;
+    if (integrity == integrity_check::yes && _components->digest && digest_result) {
+        digest = *get_digest();
+    }
+
     if (_components->compression && raw == raw_stream::no) {
-        // Disabling integrity checks is not supported by compressed
-        // file input streams. `integrity` is ignored.
         if (_version >= sstable_version_types::mc) {
             return make_compressed_file_m_format_input_stream(f, &_components->compression,
-               pos, len, std::move(options), permit, std::nullopt, nullptr);
+               pos, len, std::move(options), permit, digest, digest_result);
         } else {
             return make_compressed_file_k_l_format_input_stream(f, &_components->compression,
-                pos, len, std::move(options), permit, std::nullopt, nullptr);
+                pos, len, std::move(options), permit, digest, digest_result);
         }
     }
     if (_components->checksum && integrity == integrity_check::yes) {
@@ -2464,10 +2467,10 @@ input_stream<char> sstable::data_stream(uint64_t pos, size_t len,
         auto file_len = data_size();
         if (_version >= sstable_version_types::mc) {
              return make_checksummed_file_m_format_input_stream(f, file_len,
-                *checksum, pos, len, std::move(options), std::nullopt, nullptr);
+                *checksum, pos, len, std::move(options), digest, digest_result);
         } else {
             return make_checksummed_file_k_l_format_input_stream(f, file_len,
-                *checksum, pos, len, std::move(options), std::nullopt, nullptr);
+                *checksum, pos, len, std::move(options), digest, digest_result);
         }
     }
     return make_file_input_stream(f, pos, len, std::move(options));

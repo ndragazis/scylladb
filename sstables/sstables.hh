@@ -77,6 +77,7 @@ class sstables_manager;
 class metadata_collector;
 
 struct foreign_sstable_open_info;
+struct digest_validation_result;
 
 template<typename T>
 concept ConsumeRowsContext =
@@ -732,7 +733,8 @@ public:
     using raw_stream = bool_class<class raw_stream_tag>;
     input_stream<char> data_stream(uint64_t pos, size_t len,
             reader_permit permit, tracing::trace_state_ptr trace_state, lw_shared_ptr<file_input_stream_history> history,
-            raw_stream raw = raw_stream::no, integrity_check integrity = integrity_check::no);
+            raw_stream raw = raw_stream::no, integrity_check integrity = integrity_check::no,
+            digest_validation_result* digest_result = nullptr);
 
     // Read exactly the specific byte range from the data file (after
     // uncompression, if the file is compressed). This can be used to read
