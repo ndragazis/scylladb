@@ -119,6 +119,7 @@ public:
             _pos += buf.size();
             _underlying_pos += chunk_size;
 
+            sstlog.debug("get(): _pos = {}, _end_pos = {}, _file_len = {}, _expected_digest = {}, *_expected_digest = {}, _actual_digest = {}", _pos, _end_pos, _file_len, _expected_digest.has_value(), *_expected_digest, _actual_digest);
             if (_pos == _file_len && _expected_digest) {
                 if (*_expected_digest != _actual_digest) {
                     sstring msg = format("Digest mismatch: expected={}, actual={}", *_expected_digest, _actual_digest);
