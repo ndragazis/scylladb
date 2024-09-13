@@ -15,6 +15,7 @@
 #include <seastar/core/byteorder.hh>
 #include "index_reader.hh"
 #include "sstables/mx/partition_reversing_data_source.hh"
+#include "sstables/digest_validation_result.hh"
 
 namespace sstables {
 
