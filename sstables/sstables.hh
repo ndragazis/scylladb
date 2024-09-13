@@ -36,7 +36,6 @@
 #include "sstables/shareable_components.hh"
 #include "sstables/storage.hh"
 #include "sstables/generation_type.hh"
-#include "sstables/digest_validation_result.hh"
 #include "mutation/mutation_fragment_stream_validator.hh"
 #include "readers/mutation_reader_fwd.hh"
 #include "readers/mutation_reader.hh"
