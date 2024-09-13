@@ -1347,7 +1347,7 @@ private:
             sstable::disk_read_range drr{begin, *end};
             auto last_end = _fwd_mr ? _sst->data_size() : drr.end;
             _read_enabled = bool(drr);
-            _context = data_consume_rows<DataConsumeRowsContext>(*_schema, _sst, _consumer, std::move(drr), last_end, sstable::integrity_check::no);
+            _context = data_consume_rows<DataConsumeRowsContext>(*_schema, _sst, _consumer, std::move(drr), last_end, sstable::integrity_check::no, nullptr);
         }
 
         _monitor.on_read_started(_context->reader_position());
@@ -1552,7 +1552,7 @@ public:
              sstable::integrity_check integrity)
         : mp_row_consumer_reader_k_l(std::move(schema), permit, std::move(sst))
         , _consumer(this, _schema, std::move(permit), _schema->full_slice(), std::move(trace_state), streamed_mutation::forwarding::no, _sst)
-        , _context(data_consume_rows<DataConsumeRowsContext>(*_schema, _sst, _consumer, integrity))
+        , _context(data_consume_rows<DataConsumeRowsContext>(*_schema, _sst, _consumer, integrity, nullptr))
         , _monitor(mon) {
         _monitor.on_read_started(_context->reader_position());
     }
