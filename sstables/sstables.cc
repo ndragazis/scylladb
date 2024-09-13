@@ -2334,11 +2334,12 @@ sstable::make_crawling_reader(
         reader_permit permit,
         tracing::trace_state_ptr trace_state,
         read_monitor& monitor,
-        integrity_check integrity) {
+        integrity_check integrity,
+        digest_validation_result* digest_result) {
     if (_version >= version_types::mc) {
-        return mx::make_crawling_reader(shared_from_this(), std::move(schema), std::move(permit), std::move(trace_state), monitor, integrity);
+        return mx::make_crawling_reader(shared_from_this(), std::move(schema), std::move(permit), std::move(trace_state), monitor, integrity, digest_result);
     }
-    return kl::make_crawling_reader(shared_from_this(), std::move(schema), std::move(permit), std::move(trace_state), monitor, integrity);
+    return kl::make_crawling_reader(shared_from_this(), std::move(schema), std::move(permit), std::move(trace_state), monitor, integrity, digest_result);
 }
 
 static std::tuple<entry_descriptor, sstring, sstring> make_entry_descriptor(const std::filesystem::path& sst_path, sstring* const provided_ks, sstring* const provided_cf) {

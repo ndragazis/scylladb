@@ -14,6 +14,9 @@
 #include "sstables/sstables.hh"
 
 namespace sstables {
+
+struct digest_validation_result;
+
 namespace kl {
 
 mutation_reader make_reader(
@@ -47,7 +50,8 @@ mutation_reader make_crawling_reader(
         reader_permit permit,
         tracing::trace_state_ptr trace_state,
         read_monitor& monitor,
-        sstable::integrity_check integrity);
+        sstable::integrity_check integrity,
+        digest_validation_result* digest_result);
 
 } // namespace kl
 } // namespace sstables

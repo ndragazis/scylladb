@@ -14,6 +14,9 @@
 #include "sstables/sstables.hh"
 
 namespace sstables {
+
+struct digest_validation_result;
+
 namespace mx {
 
 // Precondition: if the slice is reversed, the schema must be reversed as well
@@ -50,7 +53,8 @@ mutation_reader make_crawling_reader(
         reader_permit permit,
         tracing::trace_state_ptr trace_state,
         read_monitor& monitor,
-        sstable::integrity_check integrity);
+        sstable::integrity_check integrity,
+        digest_validation_result* digest_result);
 
 // Validate the content of the sstable with the mutation_fragment_stream_valdiator,
 // additionally cross checking that the content is laid out as expected by the
