@@ -70,6 +70,7 @@
 #include "sstables/random_access_reader.hh"
 #include "sstables/sstables_manager.hh"
 #include "sstables/partition_index_cache.hh"
+#include "sstables/digest_validation_result.hh"
 #include "utils/UUID_gen.hh"
 #include "sstables_manager.hh"
 #include "tracing/traced_file.hh"
@@ -1915,6 +1916,7 @@ future<uint64_t> sstable::validate(reader_permit permit, abort_source& abort,
     lw_shared_ptr<checksum> checksum;
     try {
         checksum = co_await read_checksum();
+        co_await read_digest();
     } catch (const malformed_sstable_exception& e) {
         ex = handle_sstable_exception(e, errors);
     }
@@ -1935,7 +1937,8 @@ future<uint64_t> sstable::validate(reader_permit permit, abort_source& abort,
         co_return co_await mx::validate(shared_from_this(), std::move(permit), abort, std::move(error_handler), monitor);
     }
 
-    auto reader = make_crawling_reader(_schema, permit, nullptr, monitor, integrity_check::yes);
+    digest_validation_result digest_result {};
+    auto reader = make_crawling_reader(_schema, permit, nullptr, monitor, integrity_check::yes, &digest_result);
 
     try {
         auto validator = mutation_fragment_stream_validator(*_schema);
@@ -1965,6 +1968,11 @@ future<uint64_t> sstable::validate(reader_permit permit, abort_source& abort,
         if (auto res = validator.on_end_of_stream(); !res) {
             error_handler(res.what());
             ++errors;
+        }
+        if (digest_result.status == digest_validation_status::in_progress) {
+            on_internal_error(sstlog, "digest check did not complete due to partial read");
+        } else if (digest_result.status == digest_validation_status::invalid) {
+            throw malformed_sstable_exception(format("digest check failed: {}", *digest_result.msg));
         }
     } catch (const malformed_sstable_exception& e) {
         ex = handle_sstable_exception(e, errors);

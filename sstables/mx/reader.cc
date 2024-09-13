@@ -14,7 +14,7 @@
 #include "sstables/m_format_read_helpers.hh"
 #include "sstables/sstable_mutation_reader.hh"
 #include "sstables/processing_result_generator.hh"
-#include "sstables/mx/reader.hh"
+#include "sstables/digest_validation_result.hh"
 #include "utils/assert.hh"
 #include "utils/to_string.hh"
 #include "utils/value_or_reference.hh"
@@ -2045,7 +2045,8 @@ future<uint64_t> validate(
         sstables::read_monitor& monitor) {
     auto schema = sstable->get_schema();
     validating_consumer consumer(schema, permit, sstable, std::move(error_handler));
-    auto context = data_consume_rows<data_consume_rows_context_m<validating_consumer>>(*schema, sstable, consumer, sstable::integrity_check::yes, nullptr);
+    digest_validation_result digest_result {};
+    auto context = data_consume_rows<data_consume_rows_context_m<validating_consumer>>(*schema, sstable, consumer, sstable::integrity_check::yes, &digest_result);
 
     std::optional<sstables::index_reader> idx_reader;
     idx_reader.emplace(sstable, permit, tracing::trace_state_ptr{}, sstables::use_caching::no, false);
@@ -2139,6 +2140,11 @@ future<uint64_t> validate(
             if (idx_reader) {
                 co_await idx_reader->advance_to_next_partition();
             }
+        }
+        if (digest_result.status == digest_validation_status::in_progress) {
+            on_internal_error(sstlog, "digest check did not complete due to partial read");
+        } else if (digest_result.status == digest_validation_status::invalid) {
+            consumer.report_error(format("digest check failed: {}", *digest_result.msg));
         }
     } catch (...) {
         consumer.report_error(format("unexpected exception: {}", std::current_exception()));
