@@ -2493,17 +2493,16 @@ future<temporary_buffer<char>> sstable::data_read(uint64_t pos, size_t len, read
     });
 }
 
-using checksum_digest_check_results = std::pair<bool, std::optional<bool>>;
 
 template <typename ChecksumType>
-static future<checksum_digest_check_results>
+static future<validate_checksums_result>
 do_validate_compressed(input_stream<char>& stream, const sstables::compression& c, bool checksum_all, std::optional<uint32_t> expected_digest) {
-    checksum_digest_check_results valid {
-        true,
-        expected_digest ? std::optional<bool>(true) : std::nullopt
-    };
     uint64_t offset = 0;
     uint32_t actual_full_checksum = ChecksumType::init_checksum();
+    validate_checksums_result res {
+            .checksums_status = validate_checksums_status::valid,
+            .digest_status = expected_digest ? validate_checksums_status::valid : validate_checksums_status::no_checksum
+    };
 
     auto accessor = c.offsets.get_accessor();
     for (size_t i = 0; i < c.offsets.size(); ++i) {
@@ -2514,13 +2513,13 @@ do_validate_compressed(input_stream<char>& stream, const sstables::compression& 
 
         if (!chunk_len) {
             sstlog.error("Found unexpected chunk of length 0 at offset {}", offset);
-            valid.first = false;
+            res.checksums_status = validate_checksums_status::invalid;
             break;
         }
 
         if (buf.size() < chunk_len) {
             sstlog.error("Truncated file at offset {}: expected to get chunk of size {}, got {}", offset, chunk_len, buf.size());
-            valid.first = false;
+            res.checksums_status = validate_checksums_status::invalid;
             break;
         }
 
@@ -2529,7 +2528,7 @@ do_validate_compressed(input_stream<char>& stream, const sstables::compression& 
         auto actual_checksum = ChecksumType::checksum(buf.get(), compressed_len);
         if (actual_checksum != expected_checksum) {
             sstlog.error("Compressed chunk checksum mismatch at offset {}, for chunk #{} of size {}: expected={}, actual={}", offset, i, chunk_len, expected_checksum, actual_checksum);
-            valid.first = false;
+            res.checksums_status = validate_checksums_status::invalid;
         }
 
         offset += chunk_len;
@@ -2547,21 +2546,21 @@ do_validate_compressed(input_stream<char>& stream, const sstables::compression& 
 
     if (expected_digest && actual_full_checksum != *expected_digest) {
         sstlog.error("Full checksum mismatch: expected={}, actual={}", *expected_digest, actual_full_checksum);
-        valid.second = false;
+        res.digest_status = validate_checksums_status::invalid;
     }
 
-    co_return valid;
+    co_return res;
 }
 
 template <typename ChecksumType>
-static future<checksum_digest_check_results>
+static future<validate_checksums_result>
 do_validate_uncompressed(input_stream<char>& stream, const checksum& checksum, std::optional<uint32_t> expected_digest) {
-    checksum_digest_check_results valid {
-        true,
-        expected_digest ? std::optional<bool>(true) : std::nullopt
-    };
     uint64_t offset = 0;
     uint32_t actual_full_checksum = ChecksumType::init_checksum();
+    validate_checksums_result res {
+            .checksums_status = validate_checksums_status::valid,
+            .digest_status = expected_digest ? validate_checksums_status::valid : validate_checksums_status::no_checksum
+    };
 
     for (size_t i = 0; i < checksum.checksums.size(); ++i) {
         const auto expected_checksum = checksum.checksums[i];
@@ -2569,7 +2568,7 @@ do_validate_uncompressed(input_stream<char>& stream, const checksum& checksum, s
 
         if (buf.empty()) {
             sstlog.error("Chunk count mismatch between CRC.db and Data.db at offset {}: expected {} chunks but data file has less", offset, checksum.checksums.size());
-            valid.first = false;
+            res.checksums_status = validate_checksums_status::invalid;
             break;
         }
 
@@ -2577,7 +2576,7 @@ do_validate_uncompressed(input_stream<char>& stream, const checksum& checksum, s
 
         if (actual_checksum != expected_checksum) {
             sstlog.error("Chunk checksum mismatch at offset {}, for chunk #{} of size {}: expected={}, actual={}", offset, i, checksum.chunk_size, expected_checksum, actual_checksum);
-            valid.first = false;
+            res.checksums_status = validate_checksums_status::invalid;
         }
 
         if (expected_digest) {
@@ -2593,16 +2592,16 @@ do_validate_uncompressed(input_stream<char>& stream, const checksum& checksum, s
         auto buf = co_await stream.read();
         if (!buf.empty()) {
             sstlog.error("Chunk count mismatch between CRC.db and Data.db at offset {}: expected {} chunks but data file has more", offset, checksum.checksums.size());
-            valid.first = false;
+            res.checksums_status = validate_checksums_status::invalid;
         }
     }
 
     if (expected_digest && actual_full_checksum != expected_digest) {
         sstlog.error("Full checksum mismatch: expected={}, actual={}", *expected_digest, actual_full_checksum);
-        valid.second = false;
+        res.digest_status = validate_checksums_status::invalid;
     }
 
-    co_return valid;
+    co_return res;
 }
 
 future<std::optional<uint32_t>> sstable::read_digest() {
@@ -2678,7 +2677,7 @@ future<lw_shared_ptr<checksum>> sstable::read_checksum() {
 }
 
 future<validate_checksums_result> validate_checksums(shared_sstable sst, reader_permit permit) {
-    validate_checksums_result ret = {
+    validate_checksums_result res = {
             .checksums_status = validate_checksums_status::valid,
             .digest_status = validate_checksums_status::valid
     };
@@ -2686,30 +2685,29 @@ future<validate_checksums_result> validate_checksums(shared_sstable sst, reader_
     const auto digest = co_await sst->read_digest();
     if (!digest) {
         sstlog.warn("No digest available for SSTable: {}", sst->get_filename());
-        ret.digest_status = validate_checksums_status::no_checksum;
+        res.digest_status = validate_checksums_status::no_checksum;
     }
 
     auto data_stream = sst->data_stream(0, sst->ondisk_data_size(), permit, nullptr, nullptr, sstable::raw_stream::yes);
 
-    checksum_digest_check_results valid {true, std::optional<bool>(true)};
     std::exception_ptr ex;
 
     try {
         if (sst->get_compression()) {
             if (sst->get_version() >= sstable_version_types::mc) {
-                valid = co_await do_validate_compressed<crc32_utils>(data_stream, sst->get_compression(), true, digest);
+                res = co_await do_validate_compressed<crc32_utils>(data_stream, sst->get_compression(), true, digest);
             } else {
-                valid = co_await do_validate_compressed<adler32_utils>(data_stream, sst->get_compression(), false, digest);
+                res = co_await do_validate_compressed<adler32_utils>(data_stream, sst->get_compression(), false, digest);
             }
         } else {
             auto checksum = co_await sst->read_checksum();
             if (!checksum) {
                 sstlog.warn("No checksums available for SSTable: {}", sst->get_filename());
-                ret.checksums_status = validate_checksums_status::no_checksum;
+                res.checksums_status = validate_checksums_status::no_checksum;
             } else if (sst->get_version() >= sstable_version_types::mc) {
-                valid = co_await do_validate_uncompressed<crc32_utils>(data_stream, *checksum, digest);
+                res = co_await do_validate_uncompressed<crc32_utils>(data_stream, *checksum, digest);
             } else {
-                valid = co_await do_validate_uncompressed<adler32_utils>(data_stream, *checksum, digest);
+                res = co_await do_validate_uncompressed<adler32_utils>(data_stream, *checksum, digest);
             }
         }
     } catch (...) {
@@ -2719,12 +2717,7 @@ future<validate_checksums_result> validate_checksums(shared_sstable sst, reader_
     co_await data_stream.close();
     maybe_rethrow_exception(std::move(ex));
 
-    if (valid.first == false) {
-        ret.checksums_status = validate_checksums_status::invalid;
-    } else if (valid.second.has_value() && *valid.second == false) {
-        ret.digest_status = validate_checksums_status::invalid;
-    }
-    co_return ret;
+    co_return res;
 }
 
 void sstable::set_first_and_last_keys() {
