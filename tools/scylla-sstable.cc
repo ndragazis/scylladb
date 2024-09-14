@@ -1595,8 +1595,8 @@ void validate_checksums_operation(schema_ptr schema, reader_permit permit, const
             writer.Bool(false);
         }
         writer.Key("has_digest");
-        switch (res.checksums_status) {
-        case validate_checksums_status::valid:
+        // Digest is checked only if checksums are valid.
+        if (res.checksums_status == validate_checksums_status::valid) {
             switch (res.digest_status) {
             case validate_checksums_status::valid:
                 writer.Bool(true);
@@ -1611,9 +1611,7 @@ void validate_checksums_operation(schema_ptr schema, reader_permit permit, const
             case validate_checksums_status::no_checksum:
                 writer.Bool(true);
             }
-            break;
-        case validate_checksums_status::invalid:
-        case validate_checksums_status::no_checksum:
+        } else {
             switch (res.digest_status) {
             case validate_checksums_status::no_checksum:
                 writer.Bool(false);
