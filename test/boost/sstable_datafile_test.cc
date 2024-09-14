@@ -2817,7 +2817,8 @@ SEASTAR_TEST_CASE(test_validate_checksums) {
                 testlog.info("Validating intact {}", sst->get_filename());
 
                 res = sstables::validate_checksums(sst, permit).get();
-                BOOST_REQUIRE(res == validate_checksums_result::valid);
+                BOOST_REQUIRE(res.checksums_status == validate_checksums_status::valid);
+                BOOST_REQUIRE(res.digest_status == validate_checksums_status::valid);
 
                 auto sst_file = open_file_dma(test(sst).filename(sstables::component_type::Data).native(), open_flags::wo).get();
                 auto close_sst_file = defer([&sst_file] { sst_file.close().get(); });
@@ -2832,7 +2833,7 @@ SEASTAR_TEST_CASE(test_validate_checksums) {
                 }
 
                 res = sstables::validate_checksums(sst, permit).get();
-                BOOST_REQUIRE(res == validate_checksums_result::invalid);
+                BOOST_REQUIRE(res.checksums_status == validate_checksums_status::invalid);
 
                 testlog.info("Validating truncated {}", sst->get_filename());
 
@@ -2841,13 +2842,13 @@ SEASTAR_TEST_CASE(test_validate_checksums) {
                 }
 
                 res = sstables::validate_checksums(sst, permit).get();
-                BOOST_REQUIRE(res == validate_checksums_result::invalid);
+                BOOST_REQUIRE(res.checksums_status == validate_checksums_status::invalid);
 
                 if (compression_params == no_compression_params) {
                     testlog.info("Validating with no checksums {}", sst->get_filename());
                     sstables::test(sst).rewrite_toc_without_component(component_type::CRC);
                     auto res = sstables::validate_checksums(sst, permit).get();
-                    BOOST_REQUIRE(res == validate_checksums_result::no_checksum);
+                    BOOST_REQUIRE(res.checksums_status == validate_checksums_status::no_checksum);
                 }
             }
         }
