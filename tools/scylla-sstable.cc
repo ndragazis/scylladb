@@ -1593,7 +1593,34 @@ void validate_checksums_operation(schema_ptr schema, reader_permit permit, const
             break;
         case validate_checksums_status::no_checksum:
             writer.Bool(false);
+        }
+        writer.Key("has_digest");
+        switch (res.checksums_status) {
+        case validate_checksums_status::valid:
+            switch (res.digest_status) {
+            case validate_checksums_status::valid:
+                writer.Bool(true);
+                writer.Key("valid_digest");
+                writer.Bool(true);
+                break;
+            case validate_checksums_status::invalid:
+                writer.Bool(true);
+                writer.Key("valid_digest");
+                writer.Bool(false);
+                break;
+            case validate_checksums_status::no_checksum:
+                writer.Bool(true);
+            }
             break;
+        case validate_checksums_status::invalid:
+        case validate_checksums_status::no_checksum:
+            switch (res.digest_status) {
+            case validate_checksums_status::no_checksum:
+                writer.Bool(false);
+                break;
+            default:
+                writer.Bool(true);
+            }
         }
         writer.EndObject();
     }
