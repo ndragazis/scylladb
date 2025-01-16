@@ -26,8 +26,10 @@
 #include <fmt/ranges.h>
 
 #include "ent/encryption/encryption.hh"
+#include "ent/encryption/encrypted_file_impl.hh"
 #include "ent/encryption/symmetric_key.hh"
 #include "ent/encryption/local_file_provider.hh"
+#include "test/lib/log.hh"
 #include "test/lib/tmpdir.hh"
 #include "test/lib/random_utils.hh"
 #include "test/lib/cql_test_env.hh"
@@ -1096,3 +1098,58 @@ SEASTAR_TEST_CASE(test_kmip_network_error, *check_run_test_decorator("ENABLE_KMI
 
 // Note: cannot do the above test for gcp, because we can't use false endpoints there. Could mess with address resolution,
 // but there is no infrastructure for that atm.
+
+future<void> test_local_file_encryption(size_t buf_size) {
+    tmpdir tmp;
+    auto keyfile = tmp.path() / "keyfile";
+    key_info kinfo {"AES/CBC/PKCSPadding", 128};
+    shared_ptr<symmetric_key> k = make_shared<symmetric_key>(kinfo);
+    testlog.debug("Created symmetric key: info={} key={} ", k->info(), k->key());
+
+    const auto& filename = tmp.path() / "encrypted-file";
+    {
+        auto file = co_await open_file_dma(filename.string(), open_flags::create | open_flags::wo);
+        auto encrypted_file = seastar::file(encryption::make_encrypted_file(file, k));
+        auto ostream = co_await make_file_output_stream(encrypted_file);
+
+        auto wbuf = seastar::temporary_buffer<char>::aligned(0, buf_size);
+        co_await ostream.write(wbuf.get(), wbuf.size());
+        testlog.debug("Written {} bytes to encrypted file {}", wbuf.size(), filename);
+
+        co_await ostream.close();
+    }
+    {
+        auto file = co_await open_file_dma(filename.string(), open_flags::ro);
+        testlog.debug("size of {}: {}", filename, co_await file.size());
+
+        auto encrypted_file = seastar::file(encryption::make_encrypted_file(file, k));
+        file_input_stream_options options;
+        options.buffer_size = 4096;
+        auto istream = make_file_input_stream(encrypted_file, options);
+
+        size_t total_read_size = 0;
+        auto rbuf = co_await istream.read();
+        while (!rbuf.empty()) {
+            total_read_size += rbuf.size();
+            testlog.debug("Read {} bytes from encrypted file {}", rbuf.size(), filename);
+            rbuf = co_await istream.read();
+        }
+
+        auto diff = buf_size > total_read_size ? buf_size - total_read_size
+                                               : total_read_size - buf_size;
+        BOOST_CHECK_MESSAGE(buf_size == total_read_size, seastar::format(
+                "Wrote {} bytes and read back {} (diff: {})", buf_size, total_read_size, diff));
+
+        co_await istream.close();
+    }
+}
+
+SEASTAR_TEST_CASE(test_encryption_on_block_size_boundary) {
+    size_t encryption_block_size = 4096;
+    size_t buf_size = encryption_block_size;
+    size_t key_block_size = 16;
+    for (size_t bufsz = buf_size - key_block_size; bufsz <= buf_size + 1; bufsz++) {
+        testlog.info("Validating EaR with buffer size {}...", bufsz);
+        co_await test_local_file_encryption(bufsz);
+    }
+}
