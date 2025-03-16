@@ -56,6 +56,7 @@ public:
     };
 
     azure_host(const host_options&);
+    azure_host(const std::unordered_map<sstring, sstring>&);
 
     future<> init();
     future<key_and_id_type> get_or_create_key(const key_info&);
