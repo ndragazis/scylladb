@@ -56,6 +56,7 @@ public:
     };
 
     azure_host(const std::string& name, const host_options&);
+    azure_host(const std::string& name, const std::unordered_map<sstring, sstring>&);
     ~azure_host();
 
     future<> init();

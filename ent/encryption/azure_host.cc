@@ -24,6 +24,7 @@
 #include "utils/azure/azure_credentials_detector.hh"
 #include "azure_host.hh"
 #include "azure_cache_keys.hh"
+#include "encryption.hh"
 #include "encryption_exceptions.hh"
 
 using namespace std::chrono_literals;
@@ -290,6 +291,28 @@ future<bytes> azure_host::impl::find_key(const id_cache_key& k) {
 // ==================== azure_host class implementation ====================
 
 azure_host::azure_host(const std::string& name, const host_options& options) : _impl(std::make_unique<impl>(name, options)) {}
+
+azure_host::azure_host(const std::string& name, const std::unordered_map<sstring, sstring>& map)
+    : azure_host(name, [&map] {
+        host_options opts;
+        map_wrapper<std::unordered_map<sstring, sstring>> m(map);
+
+        opts.tenant_id = m("azure_tenant_id").value_or("");
+        opts.client_id = m("azure_client_id").value_or("");
+        opts.client_secret = m("azure_client_secret").value_or("");
+        opts.client_cert = m("azure_client_certificate_path").value_or("");
+
+        opts.master_key = m("master_key").value_or("");
+
+        opts.truststore = m("truststore").value_or("");
+        opts.priority_string = m("priority_string").value_or("");
+
+        opts.key_cache_expiry = parse_expiry(m("key_cache_expiry"));
+        opts.key_cache_refresh = parse_expiry(m("key_cache_refresh"));
+
+        return opts;
+    }())
+{}
 
 azure_host::~azure_host() = default;
 
