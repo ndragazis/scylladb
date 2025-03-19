@@ -15,6 +15,7 @@
 #include <seastar/core/shared_ptr.hh>
 
 #include "symmetric_key.hh"
+#include "azure_credentials.hh"
 
 namespace encryption {
 
@@ -41,6 +42,17 @@ public:
 
         std::optional<std::chrono::milliseconds> key_cache_expiry;
         std::optional<std::chrono::milliseconds> key_cache_refresh;
+
+        std::unique_ptr<azure::credentials> get_credentials() const {
+            if (!tenant_id.empty() && !client_id.empty() && (!client_secret.empty() || !client_cert.empty())) {
+                return std::make_unique<azure::service_principal_credentials>(
+                    tenant_id,
+                    client_id,
+                    client_secret,
+                    client_cert);
+            }
+            return {};
+        }
     };
 
     azure_host(const host_options&);

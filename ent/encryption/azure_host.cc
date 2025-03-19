@@ -30,6 +30,7 @@ public:
     future<key_ptr> get_key_by_id(const id_type&, const key_info&);
 private:
     const host_options _options;
+    std::unique_ptr<azure::credentials> _credentials;
 
     template<typename Key, typename Value, typename Hash>
     using cache_type = utils::loading_cache<
@@ -47,6 +48,7 @@ private:
 
 azure_host::impl::impl(const azure_host::host_options& options)
     : _options(options)
+    , _credentials(options.get_credentials())
     , _attr_cache(utils::loading_cache_config{
         .max_size = std::numeric_limits<size_t>::max(),
         .expiry = options.key_cache_expiry.value_or(default_expiry),
