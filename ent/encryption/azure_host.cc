@@ -57,6 +57,7 @@ private:
     static constexpr char AKV_PATH_TEMPLATE[] = "/keys/{}/{}/{}?api-version=7.4";
     static constexpr char AKV_LATEST_VERSION[] = "";
     static constexpr char AKV_WRAPKEY_OP[] = "wrapkey";
+    static constexpr char AKV_UNWRAPKEY_OP[] = "unwrapkey";
     static constexpr char AKV_TOKEN_ALG[] = "RSA-OAEP-256";
     static constexpr char AKV_TOKEN_SCOPE[] = "https://vault.azure.net/.default";
 
@@ -106,7 +107,20 @@ future<azure_host::key_and_id_type> azure_host::impl::get_or_create_key(const ke
 }
 
 future<azure_host::key_ptr> azure_host::impl::get_key_by_id(const azure_host::id_type& id, const key_info& info) {
-    throw std::logic_error("Not implemented");
+    id_cache_key key { .id = id };
+    try {
+        auto data = co_await _id_cache.get(key);
+        co_return make_shared<symmetric_key>(info, data);
+    } catch (base_error&) {
+        throw;
+    } catch (std::invalid_argument& e) {
+        std::throw_with_nested(configuration_error(fmt::format("get_key_by_id: {}", e.what())));
+    } catch (rjson::malformed_value& e) {
+        std::throw_with_nested(malformed_response_error(fmt::format("get_key_by_id: {}", e.what())));
+    } catch (...) {
+        std::throw_with_nested(service_error(fmt::format("get_key_by_id: {}", std::current_exception())));
+    }
+
 }
 
 std::tuple<std::string, std::string> azure_host::impl::parse_key(std::string_view spec) {
@@ -176,7 +190,29 @@ future<azure_host::key_and_id_type> azure_host::impl::create_key(const attr_cach
 }
 
 future<bytes> azure_host::impl::find_key(const id_cache_key& k) {
-    throw std::logic_error("Not implemented");
+    const auto id = to_string_view(k.id);
+    azlog.debug("Finding key: {}", id);
+
+    auto [vault, keyname, version, cipher] = [&id] {
+        boost::regex id_regex(R"foo(([^/]+)/([^/]+)/([^:]+):(.+))foo");
+        boost::match_results<std::string_view::const_iterator> match;
+        if (!boost::regex_search(id.begin(), id.end(), match, id_regex)) {
+            throw std::invalid_argument(fmt::format("Not a valid key id: {}", id));
+        }
+        return std::make_tuple(match[1].str(), match[2].str(), match[3].str(), match[4].str());
+    }();
+
+    auto host = seastar::format(AKV_HOST_TEMPLATE, vault);
+    auto path = seastar::format(AKV_PATH_TEMPLATE, keyname, version, AKV_UNWRAPKEY_OP);
+    auto body = [&cipher] {
+        auto b = rjson::empty_object();
+        rjson::add(b, "alg", AKV_TOKEN_ALG);
+        rjson::add(b, "value", cipher);
+        return b;
+    }();
+    auto resp = co_await send_request(host, path, body);
+    auto data = base64_decode(rjson::get<std::string>(resp, "value"));
+    co_return data;
 }
 
 // ==================== azure_host class implementation ====================
