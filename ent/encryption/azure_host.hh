@@ -19,6 +19,8 @@
 
 namespace encryption {
 
+class encryption_context;
+
 class azure_host {
     class impl;
     std::unique_ptr<impl> _impl;
@@ -55,8 +57,8 @@ public:
         }
     };
 
-    azure_host(const std::string& name, const host_options&);
-    azure_host(const std::string& name, const std::unordered_map<sstring, sstring>&);
+    azure_host(encryption_context&, const std::string& name, const host_options&);
+    azure_host(encryption_context&, const std::string& name, const std::unordered_map<sstring, sstring>&);
     ~azure_host();
 
     future<> init();
