@@ -407,6 +407,10 @@ public:
         return get_host<gcp_host>(host, _per_thread_gcp_host_cache, _cfg->gcp_hosts());
     }
 
+    shared_ptr<azure_host> get_azure_host(const sstring& host) override {
+        return get_host<azure_host>(host, _per_thread_azure_host_cache, _cfg->azure_hosts());
+    }
+
 
     const encryption_config& config() const override {
         return *_cfg;
