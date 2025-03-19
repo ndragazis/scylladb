@@ -43,6 +43,18 @@ future<credentials_detector::credentials_opt> credentials_detector::detect(sourc
 }
 
 future<credentials_detector::credentials_opt> credentials_detector::get_credentials_from_env() {
+    auto tenant_id = std::getenv("AZURE_TENANT_ID");
+    auto client_id = std::getenv("AZURE_CLIENT_ID");
+    auto client_secret = std::getenv("AZURE_CLIENT_SECRET");
+    auto client_certificate_path = std::getenv("AZURE_CLIENT_CERTIFICATE_PATH");
+    if (tenant_id && client_id && (client_secret || client_certificate_path)) {
+        co_return std::make_unique<service_principal_credentials>(
+            tenant_id,
+            client_id,
+            client_secret ? client_secret : "",
+            client_certificate_path ? client_certificate_path : ""
+        );
+    }
     co_return std::nullopt;
 }
 
