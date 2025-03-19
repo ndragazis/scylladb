@@ -21,6 +21,7 @@
 #include "utils/loading_cache.hh"
 #include "azure_host.hh"
 #include "azure_cache_keys.hh"
+#include "azure_credentials_detector.hh"
 #include "encryption_exceptions.hh"
 
 using namespace std::chrono_literals;
@@ -91,8 +92,13 @@ future<> azure_host::impl::init() {
         co_return;
     }
     if (!_credentials) {
-        azlog.info("No credentials configured. Not verifying.");
-        co_return;
+        azlog.info("No credentials configured. Detecting...");
+        auto creds = co_await azure::credentials_detector::detect();
+        if (creds) {
+            _credentials = std::move(*creds);
+        } else {
+            throw configuration_error("No credentials configured for azure host");
+        }
     }
 
     azlog.debug("Wrapping a dummy key");
