@@ -40,6 +40,7 @@ public:
 private:
     const host_options _options;
     std::unique_ptr<azure::credentials> _credentials;
+    bool _initialized;
 
     template<typename Key, typename Value, typename Hash>
     using cache_type = utils::loading_cache<
@@ -70,6 +71,7 @@ private:
 azure_host::impl::impl(const azure_host::host_options& options)
     : _options(options)
     , _credentials(options.get_credentials())
+    , _initialized(false)
     , _attr_cache(utils::loading_cache_config{
         .max_size = std::numeric_limits<size_t>::max(),
         .expiry = options.key_cache_expiry.value_or(default_expiry),
@@ -81,10 +83,38 @@ azure_host::impl::impl(const azure_host::host_options& options)
 {}
 
 future<> azure_host::impl::init() {
-    throw std::logic_error("Not implemented");
+    if (_initialized) {
+        co_return;
+    }
+    if (_options.master_key.empty()) {
+        azlog.info("No master key configured. Not verifying.");
+        co_return;
+    }
+    if (!_credentials) {
+        azlog.info("No credentials configured. Not verifying.");
+        co_return;
+    }
+
+    azlog.debug("Wrapping a dummy key");
+    attr_cache_key k{
+        .master_key = _options.master_key,
+        .info = key_info{ .alg = "AES", .len = 128 },
+    };
+    auto [key, id] = co_await create_key(k);
+    azlog.debug("Unwrapping the dummy key");
+    auto data = co_await find_key({ .id = id });
+    if (key->key() == data) {
+        azlog.info("Key verified successfully");
+    } else {
+        throw std::runtime_error("Key verification failed");
+    }
+    _initialized = true;
 }
 
 future<azure_host::key_and_id_type> azure_host::impl::get_or_create_key(const key_info& info) {
+    if (!_initialized) {
+        throw std::runtime_error("Azure host not initialized");
+    }
     attr_cache_key key {
         .master_key = _options.master_key,
         .info = info,
@@ -107,6 +137,9 @@ future<azure_host::key_and_id_type> azure_host::impl::get_or_create_key(const ke
 }
 
 future<azure_host::key_ptr> azure_host::impl::get_key_by_id(const azure_host::id_type& id, const key_info& info) {
+    if (!_initialized) {
+        throw std::runtime_error("Azure host not initialized");
+    }
     id_cache_key key { .id = id };
     try {
         auto data = co_await _id_cache.get(key);
