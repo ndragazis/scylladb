@@ -21,6 +21,7 @@
 #include "utils/rjson.hh"
 #include "utils/base64.hh"
 #include "utils/loading_cache.hh"
+#include "utils/azure/azure_credentials_detector.hh"
 #include "azure_host.hh"
 #include "azure_cache_keys.hh"
 #include "encryption_exceptions.hh"
@@ -110,7 +111,13 @@ future<azure::credentials*> azure_host::impl::get_credentials() {
     if (_credentials) {
         co_return _credentials.get();
     }
-    throw configuration_error(fmt::format("No credentials configured for host {}.", _name));
+    azlog.info("No credentials configured for host {}. Detecting...", _name);
+    auto creds = co_await azure::credentials_detector::detect();
+    if (creds) {
+        _credentials = std::move(*creds);
+        co_return _credentials.get();
+    }
+    throw configuration_error(fmt::format("Could not determine credentials for host {}", _name));
 }
 
 future<> azure_host::impl::init() {
