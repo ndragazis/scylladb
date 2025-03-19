@@ -35,11 +35,13 @@ class azure_host::impl {
 public:
     static inline constexpr std::chrono::milliseconds default_expiry = 600s;
     static inline constexpr std::chrono::milliseconds default_refresh = 1200s;
-    impl(const host_options& options);
+    impl(encryption_context&, const std::string& name, const host_options& options);
     future<> init();
     future<key_and_id_type> get_or_create_key(const key_info&);
     future<key_ptr> get_key_by_id(const id_type&, const key_info&);
 private:
+    encryption_context& _ctxt;
+    const std::string _name;
     const host_options _options;
     std::unique_ptr<azure::credentials> _credentials;
     bool _initialized;
@@ -70,8 +72,10 @@ private:
     future<bytes> find_key(const id_cache_key&);
 };
 
-azure_host::impl::impl(const azure_host::host_options& options)
-    : _options(options)
+azure_host::impl::impl(encryption_context& ctxt, const std::string& name, const azure_host::host_options& options)
+    : _ctxt(ctxt)
+    , _name(name)
+    , _options(options)
     , _credentials(options.get_credentials())
     , _initialized(false)
     , _attr_cache(utils::loading_cache_config{
@@ -257,10 +261,12 @@ future<bytes> azure_host::impl::find_key(const id_cache_key& k) {
 
 // ==================== azure_host class implementation ====================
 
-azure_host::azure_host(const host_options& options) : _impl(std::make_unique<impl>(options)) {}
+encryption::azure_host::azure_host(encryption_context& ctxt, const std::string& name, const host_options& options)
+    : _impl(std::make_unique<impl>(ctxt, name, options))
+{}
 
-azure_host::azure_host(const std::unordered_map<sstring, sstring>& map)
-    : azure_host([&map] {
+azure_host::azure_host(encryption_context& ctxt, const std::string& name, const std::unordered_map<sstring, sstring>& map)
+    : azure_host(ctxt, name, [&map] {
         host_options opts;
         map_wrapper<std::unordered_map<sstring, sstring>> m(map);
 
