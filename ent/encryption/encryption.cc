@@ -71,11 +71,46 @@ static constexpr auto KMIP_KEY_PROVIDER_FACTORY = "KmipKeyProviderFactory";
 static constexpr auto KMS_KEY_PROVIDER_FACTORY = "KmsKeyProviderFactory";
 static constexpr auto GCP_KEY_PROVIDER_FACTORY = "GcpKeyProviderFactory";
 
-bytes base64_decode(const sstring& s, size_t off, size_t len) {
-    if (off >= s.size()) {
+static sstring base64url_to_base64(const sstring& str) {
+    sstring ret = str;
+    size_t mod = str.size() % 4;
+    if (mod == 1) {
+        std::invalid_argument(seastar::format("Base64 encoded length is invalid: {}", str.size()));
+    } else if (mod == 2) {
+        ret.append("==", 2);
+    } else if (mod == 3) {
+        ret.append("=", 1);
+    }
+    for (char& c : ret) {
+        if (c == '-') {
+            c = '+';
+        } else if (c == '_') {
+            c = '/';
+        }
+    }
+    return ret;
+}
+
+static void base64_to_base64url(sstring& str) {
+    for (char& c : str) {
+        if (c == '+') {
+            c = '-';
+        } else if (c == '/') {
+            c = '_';
+        }
+    }
+    size_t padding_pos = str.find('=');
+    if (padding_pos != str.npos) {
+        str.resize(padding_pos);
+    }
+}
+
+bytes base64_decode(const sstring& base64url_s, size_t off, size_t len) {
+    auto base64_s = base64url_to_base64(base64url_s);
+    if (off >= base64_s.size()) {
         throw std::out_of_range("Invalid offset");
     }
-    len = std::min(len, s.size() - off);
+    len = std::min(len, base64_s.size() - off);
     auto n = (len / 4) * 3;
     bytes b{bytes::initialized_later(), n};
 
@@ -89,22 +124,22 @@ bytes base64_decode(const sstring& s, size_t off, size_t len) {
     ::EVP_DecodeInit(ctxt.get());
 
     int outl = 0;
-    auto r = ::EVP_DecodeUpdate(ctxt.get(), reinterpret_cast<uint8_t*>(b.data()), &outl, reinterpret_cast<const uint8_t *>(s.data() + off),
+    auto r = ::EVP_DecodeUpdate(ctxt.get(), reinterpret_cast<uint8_t*>(b.data()), &outl, reinterpret_cast<const uint8_t *>(base64_s.data() + off),
                     int(len));
     if (r < 0) {
-        throw std::invalid_argument("Could not decode: " + s);
+        throw std::invalid_argument("Could not decode: " + base64url_s);
     }
 
     int outl2 = 0;
     r = ::EVP_DecodeFinal(ctxt.get(), reinterpret_cast<uint8_t*>(b.data() + outl), &outl2);
     if (r < 0) {
-        throw std::invalid_argument("Could not decode: " + s);
+        throw std::invalid_argument("Could not decode: " + base64url_s);
     }
     b.resize(outl + outl2);
     return b;
 }
 
-sstring base64_encode(const bytes& b, size_t off, size_t len) {
+sstring base64_encode(const bytes& b, size_t off, size_t len, make_url_safe url_safe) {
     if (off >= b.size()) {
         throw std::out_of_range("Invalid offset");
     }
@@ -117,6 +152,9 @@ sstring base64_encode(const bytes& b, size_t off, size_t len) {
         throw std::invalid_argument("Could not encode");
     }
     s.resize(r);
+    if (url_safe == make_url_safe::yes) {
+        base64_to_base64url(s);
+    }
     return s;
 }
 

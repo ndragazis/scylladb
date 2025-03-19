@@ -58,7 +58,8 @@ inline const sstring TEMPLATE_NAME = "template_name";
 inline const sstring KEY_NAMESPACE = "key_namespace";
 
 bytes base64_decode(const sstring&, size_t off = 0, size_t n = sstring::npos);
-sstring base64_encode(const bytes&, size_t off = 0, size_t n = bytes::npos);
+using make_url_safe = bool_class<class url_safe_tag>;
+sstring base64_encode(const bytes&, size_t off = 0, size_t n = bytes::npos, make_url_safe url_safe = make_url_safe::no);
 bytes calculate_md5(const bytes&, size_t off = 0, size_t n = bytes::npos);
 bytes calculate_sha256(const bytes&, size_t off = 0, size_t n = bytes::npos);
 bytes calculate_sha256(bytes_view);
