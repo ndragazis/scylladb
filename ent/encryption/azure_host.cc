@@ -205,6 +205,17 @@ future<rjson::value> azure_host::impl::send_request(const sstring& host, const s
 
 future<azure_host::key_and_id_type> azure_host::impl::create_key(const attr_cache_key& k) {
     auto& info = k.info;
+    if (this_shard_id() != 0) {
+        auto [data, id] = co_await smp::submit_to(0, [this, k]() -> future<std::tuple<bytes, id_type>> {
+            auto host = _ctxt.get_azure_host(_name);
+            auto [key, id] = co_await host->_impl->_attr_cache.get(k);
+            co_return std::make_tuple(key != nullptr ? key->key() : bytes{}, id);
+        });
+        co_return key_and_id_type{
+            data.empty() ? nullptr : make_shared<symmetric_key>(info, data),
+            id
+        };
+    }
     azlog.debug("Creating new key: {}", info);
     auto [vault, keyname] = parse_key(k.master_key);
     auto key = make_shared<symmetric_key>(info);
@@ -234,6 +245,13 @@ future<azure_host::key_and_id_type> azure_host::impl::create_key(const attr_cach
 }
 
 future<bytes> azure_host::impl::find_key(const id_cache_key& k) {
+    if (this_shard_id() != 0) {
+        co_return co_await smp::submit_to(0, [this, k]() -> future<bytes> {
+            auto host = _ctxt.get_azure_host(_name);
+            auto bytes = co_await host->_impl->_id_cache.get(k);
+            co_return bytes;
+        });
+    }
     const auto id = to_string_view(k.id);
     azlog.debug("Finding key: {}", id);
 
