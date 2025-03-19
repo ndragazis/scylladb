@@ -43,6 +43,7 @@ private:
     const std::string _name;
     const host_options _options;
     std::unique_ptr<azure::credentials> _credentials;
+    bool _initialized;
 
     template<typename Key, typename Value, typename Hash>
     using cache_type = utils::loading_cache<
@@ -75,6 +76,7 @@ azure_host::impl::impl(const std::string& name, const host_options& options)
     : _name(name)
     , _options(options)
     , _credentials(options.get_credentials())
+    , _initialized(false)
     , _attr_cache(utils::loading_cache_config{
         .max_size = std::numeric_limits<size_t>::max(),
         .expiry = options.key_cache_expiry.value_or(default_expiry),
@@ -112,7 +114,28 @@ future<azure::credentials*> azure_host::impl::get_credentials() {
 }
 
 future<> azure_host::impl::init() {
-    throw std::logic_error("Not implemented");
+    if (_initialized) {
+        co_return;
+    }
+    if (_options.master_key.empty()) {
+        azlog.info("No master key configured for host {}. Not verifying.", _name);
+        co_return;
+    }
+    azlog.info("Verifying access to master key {} for host {}", _options.master_key, _name);
+    co_await wrap_exceptions<void>("init", [this] -> future<> {
+        azlog.debug("Wrapping a dummy key");
+        attr_cache_key k{
+            .master_key = _options.master_key,
+            .info = key_info{ .alg = "AES", .len = 128 },
+        };
+        auto [key, id] = co_await create_key(k);
+        azlog.debug("Unwrapping the dummy key");
+        auto data = co_await find_key({ .id = id });
+        if (key->key() != data) {
+            throw service_error(fmt::format("Key verification failed for host {}", _name));
+        }
+        _initialized = true;
+    });
 }
 
 future<azure_host::key_and_id_type> azure_host::impl::get_or_create_key(const key_info& info) {
