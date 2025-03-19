@@ -31,6 +31,7 @@ public:
 private:
     const std::string _name;
     const host_options _options;
+    std::unique_ptr<azure::credentials> _credentials;
 
     template<typename Key, typename Value, typename Hash>
     using cache_type = utils::loading_cache<
@@ -49,6 +50,7 @@ private:
 azure_host::impl::impl(const std::string& name, const host_options& options)
     : _name(name)
     , _options(options)
+    , _credentials(options.get_credentials())
     , _attr_cache(utils::loading_cache_config{
         .max_size = std::numeric_limits<size_t>::max(),
         .expiry = options.key_cache_expiry.value_or(default_expiry),
