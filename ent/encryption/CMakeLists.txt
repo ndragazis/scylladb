@@ -11,6 +11,7 @@ target_sources(scylla_encryption
     encryption_config.cc
     azure_host.cc
     azure_credentials.cc
+    azure_credentials_detector.cc
     gcp_host.cc
     gcp_key_provider.cc
     kmip_host.cc
