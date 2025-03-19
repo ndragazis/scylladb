@@ -49,6 +49,11 @@ class service_principal_credentials : public credentials {
     sstring _client_id;
     sstring _client_secret;
     sstring _client_cert;
+
+    sstring get_token_host();
+    sstring get_token_path();
+    future<> refresh_with_secret(const resource_type& resource_uri);
+    future<> refresh_with_certificate(const resource_type& resource_uri);
 public:
     service_principal_credentials(const sstring& tenant_id, const sstring& client_id, const sstring& client_secret, const sstring& client_cert);
     future<> refresh(const resource_type& resource_uri) override;
