@@ -59,6 +59,7 @@ public:
 
     azure_host(encryption_context&, const std::string& name, const host_options&);
     azure_host(encryption_context&, const std::string& name, const std::unordered_map<sstring, sstring>&);
+    ~azure_host();
 
     future<> init();
     future<key_and_id_type> get_or_create_key(const key_info&);

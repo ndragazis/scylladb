@@ -305,6 +305,8 @@ azure_host::azure_host(encryption_context& ctxt, const std::string& name, const 
     }())
 {}
 
+azure_host::~azure_host() = default;
+
 future<> azure_host::init() {
     return _impl->init();
 }
