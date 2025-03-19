@@ -44,6 +44,7 @@
 #include "kms_host.hh"
 #include "gcp_key_provider.hh"
 #include "gcp_host.hh"
+#include "azure_host.hh"
 #include "bytes.hh"
 #include "utils/class_registrator.hh"
 #include "cql3/query_processor.hh"
@@ -276,6 +277,7 @@ class encryption_context_impl : public encryption_context {
     std::vector<std::unordered_map<sstring, shared_ptr<kmip_host>>> _per_thread_kmip_host_cache;
     std::vector<std::unordered_map<sstring, shared_ptr<kms_host>>> _per_thread_kms_host_cache;
     std::vector<std::unordered_map<sstring, shared_ptr<gcp_host>>> _per_thread_gcp_host_cache;
+    std::vector<std::unordered_map<sstring, shared_ptr<azure_host>>> _per_thread_azure_host_cache;
     std::vector<shared_ptr<encryption_schema_extension>> _per_thread_global_user_extension;
     std::unique_ptr<encryption_config> _cfg;
     sharded<cql3::query_processor>* _qp;;
@@ -291,6 +293,7 @@ public:
         , _per_thread_kmip_host_cache(smp::count)
         , _per_thread_kms_host_cache(smp::count)
         , _per_thread_gcp_host_cache(smp::count)
+        , _per_thread_azure_host_cache(smp::count)
         , _per_thread_global_user_extension(smp::count)
         , _cfg(std::move(cfg))
         , _qp(find_or_null<cql3::query_processor>(services))
