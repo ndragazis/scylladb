@@ -1017,6 +1017,14 @@ future<seastar::shared_ptr<encryption_context>> register_extensions(const db::co
             });
         }
 
+        if (!cfg.azure_hosts().empty()) {
+            // only pre-create on shard 0.
+            co_await parallel_for_each(cfg.azure_hosts(), [ctxt](auto& p) {
+                auto host = ctxt->get_azure_host(p.first);
+                return host->init();
+            });
+        }
+
         replicated_key_provider_factory::init(exts);
 
         auto user_opts = maybe_get_options(cfg.user_info_encryption(), "user table encryption");
