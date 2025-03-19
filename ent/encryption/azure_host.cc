@@ -54,6 +54,7 @@ private:
         Hash
     >;
     cache_type<attr_cache_key, key_and_id_type, attr_cache_key_hash> _attr_cache;
+    cache_type<id_cache_key, bytes, id_cache_key_hash> _id_cache;
 
     static constexpr char AKV_HOST_TEMPLATE[] = "{}.vault.azure.net";
     static constexpr char AKV_PATH_TEMPLATE[] = "/keys/{}/{}/{}?api-version=7.4";
@@ -66,6 +67,7 @@ private:
     future<azure::credentials*> get_credentials();
     future<rjson::value> send_request(const sstring& host, const sstring& path, const rjson::value& body);
     future<key_and_id_type> create_key(const attr_cache_key&);
+    future<bytes> find_key(const id_cache_key&);
 };
 
 azure_host::impl::impl(const std::string& name, const host_options& options)
@@ -76,6 +78,10 @@ azure_host::impl::impl(const std::string& name, const host_options& options)
         .max_size = std::numeric_limits<size_t>::max(),
         .expiry = options.key_cache_expiry.value_or(default_expiry),
         .refresh = options.key_cache_refresh.value_or(default_refresh)}, azlog, std::bind_front(&impl::create_key, this))
+    , _id_cache(utils::loading_cache_config{
+        .max_size = std::numeric_limits<size_t>::max(),
+        .expiry = options.key_cache_expiry.value_or(default_expiry),
+        .refresh = options.key_cache_refresh.value_or(default_refresh)}, azlog, std::bind_front(&impl::find_key, this))
 {}
 
 /**
@@ -212,6 +218,10 @@ future<azure_host::key_and_id_type> azure_host::impl::create_key(const attr_cach
 
     azlog.trace("Created key id {}", sid);
     co_return key_and_id_type{ key, id };
+}
+
+future<bytes> azure_host::impl::find_key(const id_cache_key& k) {
+    throw std::logic_error("Not implemented");
 }
 
 // ==================== azure_host class implementation ====================
