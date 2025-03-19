@@ -93,16 +93,16 @@ future<> azure_host::impl::init() {
         co_return;
     }
     if (_options.master_key.empty()) {
-        azlog.info("No master key configured. Not verifying.");
+        azlog.info("No master key configured for host {}. Not verifying.", _name);
         co_return;
     }
     if (!_credentials) {
-        azlog.info("No credentials configured. Detecting...");
+        azlog.info("No credentials configured for host {}. Detecting...", _name);
         auto creds = co_await azure::credentials_detector::detect();
         if (creds) {
             _credentials = std::move(*creds);
         } else {
-            throw configuration_error("No credentials configured for azure host");
+            throw configuration_error(fmt::format("No credentials detected for host {}", _name));
         }
     }
 
@@ -117,14 +117,14 @@ future<> azure_host::impl::init() {
     if (key->key() == data) {
         azlog.info("Key verified successfully");
     } else {
-        throw std::runtime_error("Key verification failed");
+        throw std::runtime_error(fmt::format("Key verification failed for host {}", _name));
     }
     _initialized = true;
 }
 
 future<azure_host::key_and_id_type> azure_host::impl::get_or_create_key(const key_info& info) {
     if (!_initialized) {
-        throw std::runtime_error("Azure host not initialized");
+        throw std::runtime_error(fmt::format("Host {} not initialized", _name));
     }
     attr_cache_key key {
         .master_key = _options.master_key,
@@ -132,7 +132,7 @@ future<azure_host::key_and_id_type> azure_host::impl::get_or_create_key(const ke
     };
 
     if (key.master_key.empty()) {
-        throw configuration_error("No master key set in azure host config");
+        throw configuration_error(fmt::format("No master key configured for host {}", _name));
     }
     try {
         co_return co_await _attr_cache.get(key);
@@ -149,7 +149,7 @@ future<azure_host::key_and_id_type> azure_host::impl::get_or_create_key(const ke
 
 future<azure_host::key_ptr> azure_host::impl::get_key_by_id(const azure_host::id_type& id, const key_info& info) {
     if (!_initialized) {
-        throw std::runtime_error("Azure host not initialized");
+        throw std::runtime_error(fmt::format("Host {} not initialized", _name));
     }
     id_cache_key key { .id = id };
     try {
