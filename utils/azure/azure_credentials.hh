@@ -41,4 +41,23 @@ public:
     future<access_token> get_access_token(const resource_type& resource_uri);
 };
 
+class service_principal_credentials : public credentials {
+    static constexpr char AZURE_ENTRA_ID_HOST[] = "login.microsoftonline.com";
+    static constexpr char AZURE_ENTRA_ID_TOKEN_PATH[] = "/oauth2/v2.0/token";
+
+    sstring _tenant_id;
+    sstring _client_id;
+    sstring _client_secret;
+    sstring _client_cert;
+public:
+    service_principal_credentials(const sstring& tenant_id, const sstring& client_id, const sstring& client_secret, const sstring& client_cert);
+    future<> refresh(const resource_type& resource_uri) override;
+};
+
+class managed_identity_credentials : public credentials {
+    static constexpr char IMDS_INSTANCE_METADATA_URL[] = "http://169.254.169.254/metadata/instance";
+public:
+    future<> refresh(const resource_type& resource_uri) override;
+};
+
 }

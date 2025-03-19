@@ -37,4 +37,19 @@ future<access_token> credentials::get_access_token(const resource_type& resource
     co_return token;
 }
 
+service_principal_credentials::service_principal_credentials(const sstring& tenant_id, const sstring& client_id, const sstring& client_secret, const sstring& client_cert)
+        : _tenant_id(tenant_id)
+        , _client_id(client_id)
+        , _client_secret(client_secret)
+        , _client_cert(client_cert)
+{}
+
+future<> service_principal_credentials::refresh(const resource_type& resource_uri) {
+    throw std::logic_error("Not implemented");
+}
+
+future<> managed_identity_credentials::refresh(const resource_type& resource_uri) {
+    throw std::logic_error("Not implemented");
+}
+
 }
