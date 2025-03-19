@@ -24,9 +24,19 @@ static logger azcredlog("azure_credentials");
 
 namespace azure {
 
+template <typename T>
+static T get_with_aliases(const rjson::value& json, std::initializer_list<std::string> keys) {
+    for (const auto& key : keys) {
+        if (auto value = rjson::get_opt<T>(json, key); value) {
+            return *value;
+        }
+    }
+    return T{};
+}
+
 access_token::access_token(const rjson::value& json, const scopes_type& scopes)
-    : token(rjson::get<std::string>(json, "access_token"))
-    , expiry(timeout_clock::now() + std::chrono::seconds(rjson::get<int>(json, "expires_in")))
+    : token(get_with_aliases<std::string>(json, {"access_token", "accessToken"}))
+    , expiry(timeout_clock::now() + std::chrono::seconds(get_with_aliases<int>(json, {"expires_in", "expires_on"})))
     , scopes(scopes)
 {}
 
