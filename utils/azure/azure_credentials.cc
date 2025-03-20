@@ -225,8 +225,26 @@ future<> service_principal_credentials::refresh_with_certificate(const resource_
     ).finally([&] -> future<> { co_await http_client.close(); });
 }
 
+sstring managed_identity_credentials::get_token_host() {
+    return IMDS_HOST;
+}
+
+sstring managed_identity_credentials::get_token_path(const resource_type& resource_uri) {
+    return seastar::format("/metadata/identity/oauth2/token?api-version=2018-02-01&resource={}", resource_uri);
+}
+
 future<> managed_identity_credentials::refresh(const resource_type& resource_uri) {
-    throw std::logic_error("Not implemented");
+    auto req = http::request::make("GET", get_token_host(), get_token_path(resource_uri));
+    req._headers["Metadata"] = "true";
+    auto factory = std::make_unique<utils::http::dns_connection_factory>(get_token_host(), 80, true, azcredlog);
+    http::experimental::client http_client(std::move(factory), 1, http::experimental::client::retry_requests::yes);
+    co_await http_client.make_request(std::move(req), [&](const http::reply& rep, input_stream<char>&& in) -> future<> {
+            auto lin = std::move(in);
+            auto s = co_await util::read_entire_stream_contiguous(lin);
+            azcredlog.trace("Got response {}: {}", int(rep._status), s);
+            token = { rjson::parse(s), resource_uri };
+        }, http::reply::status_type::ok
+    ).finally([&] -> future<> { co_await http_client.close(); });
 }
 
 }

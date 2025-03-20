@@ -61,7 +61,11 @@ public:
 
 class managed_identity_credentials : public credentials {
     static constexpr char IMDS_INSTANCE_METADATA_URL[] = "http://169.254.169.254/metadata/instance";
+    static constexpr char IMDS_TOKEN_URL_TEMPLATE[] = "http://169.254.169.254/metadata/identity/oauth2/token?api-version={}&resource={}";
+    static constexpr char IMDS_HOST[] = "169.254.169.254";
 public:
+    sstring get_token_host();
+    sstring get_token_path(const resource_type&);
     future<> refresh(const resource_type& resource_uri) override;
 };
 
