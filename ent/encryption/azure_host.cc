@@ -64,7 +64,7 @@ private:
     static constexpr char AKV_WRAPKEY_OP[] = "wrapkey";
     static constexpr char AKV_UNWRAPKEY_OP[] = "unwrapkey";
     static constexpr char AKV_TOKEN_ALG[] = "RSA-OAEP-256";
-    static constexpr char AKV_TOKEN_SCOPE[] = "https://vault.azure.net/.default";
+    static constexpr char AKV_TOKEN_RESOURCE_URI[] = "https://vault.azure.net";
 
     static std::tuple<std::string, std::string> parse_key(std::string_view);
     future<rjson::value> send_request(const sstring& host, const sstring& path, const rjson::value& body);
@@ -179,7 +179,7 @@ future<rjson::value> azure_host::impl::send_request(const sstring& host, const s
     // Audience must be "cfa8b339-82a2-471a-a3c9-0fc0be7a4093".
     // https://learn.microsoft.com/en-us/azure/key-vault/secrets/overview-storage-keys#service-principal-application-id
     // https://github.com/pulumi/pulumi-azure-native/issues/2432
-    auto token = co_await _credentials->get_access_token(AKV_TOKEN_SCOPE);
+    auto token = co_await _credentials->get_access_token(AKV_TOKEN_RESOURCE_URI);
     auto req = http::request::make("POST", host, path);
     req._headers["Authorization"] = fmt::format("Bearer {}", token.token);
     req.write_body("application/json", std::move(rjson::print(body)));

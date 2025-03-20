@@ -34,10 +34,10 @@ static T get_with_aliases(const rjson::value& json, std::initializer_list<std::s
     return T{};
 }
 
-access_token::access_token(const rjson::value& json, const scopes_type& scopes)
+access_token::access_token(const rjson::value& json, const resource_type& resource_uri)
     : token(get_with_aliases<std::string>(json, {"access_token", "accessToken"}))
     , expiry(timeout_clock::now() + std::chrono::seconds(get_with_aliases<int>(json, {"expires_in", "expires_on"})))
-    , scopes(scopes)
+    , resource_uri(resource_uri)
 {}
 
 bool access_token::empty() const {
@@ -51,9 +51,9 @@ bool access_token::expired() const {
     return timeout_clock::now() >= this->expiry;
 }
 
-future<access_token> credentials::get_access_token(const scopes_type& scope) {
-    if (token.expired() || token.scopes != scope) {
-        co_await refresh(scope);
+future<access_token> credentials::get_access_token(const resource_type& resource_uri) {
+    if (token.expired() || token.resource_uri != resource_uri) {
+        co_await refresh(resource_uri);
     }
     co_return token;
 }
@@ -73,22 +73,20 @@ sstring service_principal_credentials::get_token_path() {
     return seastar::format("/{}/oauth2/v2.0/token", _tenant_id);
 }
 
-future<> service_principal_credentials::refresh(const scopes_type& scope) {
+future<> service_principal_credentials::refresh(const resource_type& resource_uri) {
     if (_client_secret != "") {
-        co_await refresh_with_secret(scope);
+        co_await refresh_with_secret(resource_uri);
     } else {
-        co_await refresh_with_certificate(scope);
+        co_await refresh_with_certificate(resource_uri);
     }
 }
 
 // Token request with secret.
 // Based on: https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow#first-case-access-token-request-with-a-shared-secret
-future<> service_principal_credentials::refresh_with_secret(const scopes_type& scope) {
+future<> service_principal_credentials::refresh_with_secret(const resource_type& resource_uri) {
     // Scopes for the client credentials flow must contain only one resource
     // identifier and only the .default scope.
-    if (!scope.ends_with(".default")) {
-        throw std::invalid_argument(seastar::format("Invalid scope {} for client credentials flow. Must end with '.default'", scope));
-    }
+    auto scope = seastar::format("{}/.default", resource_uri);
     sstring grant_type = "client_credentials";
     sstring body = seastar::format(
             "client_id={}&scope={}&client_secret={}&grant_type={}",
@@ -160,12 +158,10 @@ std::string compute_thumbprint(const std::string& pem_cert) {
 
 // Token request with certificate.
 // Based on: https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-client-creds-grant-flow#second-case-access-token-request-with-a-certificate
-future<> service_principal_credentials::refresh_with_certificate(const scopes_type& scope) {
+future<> service_principal_credentials::refresh_with_certificate(const resource_type& resource_uri) {
     // Scopes for the client credentials flow must contain only one resource
     // identifier and only the .default scope.
-    if (!scope.ends_with(".default")) {
-        throw std::invalid_argument(seastar::format("Invalid scope {} for client credentials flow. Must end with '.default'", scope));
-    }
+    auto scope = seastar::format("{}/.default", resource_uri);
     sstring grant_type = "client_credentials";
     sstring client_assertion_type = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
     std::string private_key = co_await read_pem_artifact(_client_cert, PEM_STRING_PKCS8INF);
@@ -217,7 +213,7 @@ future<> service_principal_credentials::refresh_with_certificate(const scopes_ty
     );
 }
 
-future<> managed_identity_credentials::refresh(const scopes_type& scope) {
+future<> managed_identity_credentials::refresh(const resource_type& resource_uri) {
     throw std::logic_error("Not implemented");
 }
 

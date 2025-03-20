@@ -17,28 +17,28 @@ namespace azure {
 
 using timeout_clock = std::chrono::system_clock;
 using timestamp_type = typename timeout_clock::time_point;
-using scopes_type = std::string;
+using resource_type = std::string;
 
 struct access_token {
     sstring token;
     timestamp_type expiry;
-    scopes_type scopes;
+    resource_type resource_uri;
 
     access_token() = default;
-    access_token(const rjson::value&, const scopes_type& scopes);
+    access_token(const rjson::value&, const resource_type& resource_uri);
 
     bool empty() const;
     bool expired() const;
 };
 
 class credentials {
-protected:
+public:
     access_token token;
 private:
-    virtual future<> refresh(const scopes_type& scope) = 0;
+    virtual future<> refresh(const resource_type& resource_uri) = 0;
 public:
     virtual ~credentials() = default;
-    future<access_token> get_access_token(const scopes_type& scope);
+    future<access_token> get_access_token(const resource_type& resource_uri);
 };
 
 class service_principal_credentials : public credentials {
@@ -52,17 +52,17 @@ class service_principal_credentials : public credentials {
 
     sstring get_token_host();
     sstring get_token_path();
-    future<> refresh_with_secret(const scopes_type& scope);
-    future<> refresh_with_certificate(const scopes_type& scope);
+    future<> refresh_with_secret(const resource_type& resource_uri);
+    future<> refresh_with_certificate(const resource_type& resource_uri);
 public:
     service_principal_credentials(const sstring& tenant_id, const sstring& client_id, const sstring& client_secret, const sstring& client_cert);
-    future<> refresh(const scopes_type& scope) override;
+    future<> refresh(const resource_type& resource_uri) override;
 };
 
 class managed_identity_credentials : public credentials {
     static constexpr char IMDS_INSTANCE_METADATA_URL[] = "http://169.254.169.254/metadata/instance";
 public:
-    future<> refresh(const scopes_type& scope) override;
+    future<> refresh(const resource_type& resource_uri) override;
 };
 
 }
