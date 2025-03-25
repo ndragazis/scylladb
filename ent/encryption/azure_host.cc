@@ -39,6 +39,7 @@ public:
     static inline constexpr std::chrono::milliseconds default_refresh = 1200s;
     impl(encryption_context&, const std::string& name, const host_options& options);
     future<> init();
+    const host_options& options() const;
     future<key_and_id_type> get_or_create_key(const key_info&, const option_override* = nullptr);
     future<key_ptr> get_key_by_id(const id_type&, const key_info&);
 private:
@@ -146,6 +147,10 @@ future<> azure_host::impl::init() {
         }
         _initialized = true;
     });
+}
+
+const azure_host::host_options& azure_host::impl::options() const {
+    return _options;
 }
 
 template<typename T, typename C>
@@ -348,6 +353,10 @@ azure_host::~azure_host() = default;
 
 future<> azure_host::init() {
     return _impl->init();
+}
+
+const azure_host::host_options& azure_host::options() const {
+    return _impl->options();
 }
 
 future<azure_host::key_and_id_type> azure_host::get_or_create_key(const key_info& info, const option_override* oov) {

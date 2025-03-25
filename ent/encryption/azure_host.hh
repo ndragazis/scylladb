@@ -62,6 +62,7 @@ public:
     ~azure_host();
 
     future<> init();
+    const host_options& options() const;
 
     struct option_override {
         std::optional<std::string> master_key;
