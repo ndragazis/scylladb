@@ -238,7 +238,13 @@ future<rjson::value> azure_host::impl::send_request(const sstring& host, const s
 
     auto certs = seastar::make_shared<tls::certificate_credentials>();
     co_await certs->set_system_trust();
-    http::experimental::client http_client(socket_address(addr, 443), std::move(certs), host);
+    // Azure Key Vault does not respond to TLS close_notify alert as it should
+    // per the standard: https://www.rfc-editor.org/rfc/rfc5246#section-7.2.1.
+    // This causes a 10-second stall on TLS termination, because Seastar waits
+    // for that long before closing the socket (refer to `seastar::tls::session::close()`).
+    // Set `wait_for_eof_on_shutdown=false` to close the socket immediately.
+    auto factory = std::make_unique<seastar::http::experimental::tls_connection_factory>(socket_address(addr, 443), std::move(certs), host, false);
+    http::experimental::client http_client{std::move(factory)};
     rjson::value j;
     co_await http_client.make_request(std::move(req), [&](const http::reply& rep, input_stream<char>&& in) -> future<> {
             auto lin = std::move(in);
