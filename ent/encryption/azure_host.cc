@@ -72,6 +72,7 @@ private:
     static std::tuple<std::string, std::string> parse_key(std::string_view);
     future<azure::credentials*> get_credentials();
     future<rjson::value> send_request(const sstring& host, const sstring& path, const rjson::value& body);
+    future<rjson::value> send_request_with_retry(const sstring& host, const sstring& path, const rjson::value& body);
     future<key_and_id_type> create_key(const attr_cache_key&);
     future<bytes> find_key(const id_cache_key&);
 };
@@ -191,6 +192,28 @@ std::tuple<std::string, std::string> azure_host::impl::parse_key(std::string_vie
     return std::make_tuple(std::string(spec.substr(0, i)), std::string(spec.substr(i + 1)));
 }
 
+future<rjson::value> encryption::azure_host::impl::send_request_with_retry(const sstring& host, const sstring& path, const rjson::value& body) {
+    constexpr int MAX_RETRIES = 3;
+    int retries = 0;
+    for (;;) {
+        try {
+            co_return co_await send_request(host, path, body);
+        } catch (httpd::unexpected_status_error& e) {
+            azlog.debug("{}/{}: Got unexpected response: {}", host, path, e.status());
+            if (e.status() == http::reply::status_type::unauthorized && retries++ < MAX_RETRIES) {
+                azlog.info("{}/{}: Retrying request. Remaining attempts: {}", host, path, MAX_RETRIES - retries);
+                continue;
+            }
+            if (e.status() == http::reply::status_type::unauthorized) {
+                std::throw_with_nested(permission_error(fmt::format("{}/{}", host, path)));
+            }
+            std::throw_with_nested(service_error(fmt::format("{}/{}", host, path)));
+        } catch (...) {
+            std::throw_with_nested(network_error(fmt::format("{}/{}", host, path)));
+        }
+    }
+}
+
 future<rjson::value> azure_host::impl::send_request(const sstring& host, const sstring& path, const rjson::value& body) {
     // Audience must be "cfa8b339-82a2-471a-a3c9-0fc0be7a4093".
     // https://learn.microsoft.com/en-us/azure/key-vault/secrets/overview-storage-keys#service-principal-application-id
@@ -261,7 +284,7 @@ future<azure_host::key_and_id_type> azure_host::impl::create_key(const attr_cach
     }();
     rjson::value resp;
     try {
-        resp = co_await send_request(host, path, body);
+        resp = co_await send_request_with_retry(host, path, body);
     } catch (...) {
         azlog.error("Failed to wrap key {} with master_key={} and host={}: {}", info, k.master_key, _name, std::current_exception());
         throw;
@@ -312,7 +335,7 @@ future<bytes> azure_host::impl::find_key(const id_cache_key& k) {
     }();
     rjson::value resp;
     try {
-        resp = co_await send_request(host, path, body);
+        resp = co_await send_request_with_retry(host, path, body);
     } catch (...) {
         azlog.error("Failed to unwrap key {} with host={}: {}", k.id, _name, std::current_exception());
         throw;
