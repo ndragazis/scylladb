@@ -25,10 +25,13 @@ protected:
     std::string _host;
     int _port;
     logging::logger& _logger;
+    bool _tls_wait_on_close;
     struct state {
         bool initialized = false;
         socket_address addr;
         ::shared_ptr<tls::certificate_credentials> creds;
+        state() = default;
+        state(::shared_ptr<tls::certificate_credentials> creds) : creds(std::move(creds)) {}
     };
     lw_shared_ptr<state> _state;
     shared_future<> _done;
@@ -41,7 +44,7 @@ protected:
                 state->addr = socket_address(hent.addr_list.front(), port);
             },
             [state, use_https] () -> future<> {
-                if (use_https) {
+                if (use_https && !state->creds) {
                     tls::credentials_builder cbuild;
                     co_await cbuild.set_system_trust();
                     state->creds = cbuild.build_certificate_credentials();
@@ -54,11 +57,13 @@ protected:
     }
 
 public:
-    dns_connection_factory(std::string host, int port, bool use_https, logging::logger& logger)
+    using tls_wait_on_close = bool_class<class tls_wait_on_close_tag>;
+    dns_connection_factory(std::string host, int port, bool use_https, logging::logger& logger, ::shared_ptr<tls::certificate_credentials> creds = nullptr, tls_wait_on_close wait = tls_wait_on_close::yes)
         : _host(std::move(host))
         , _port(port)
         , _logger(logger)
-        , _state(make_lw_shared<state>())
+        , _tls_wait_on_close(wait)
+        , _state(make_lw_shared<state>(std::move(creds)))
         , _done(initialize(_state, _host, _port, use_https, _logger))
     {
     }
@@ -71,7 +76,7 @@ public:
 
         if (_state->creds) {
             _logger.debug("Making new HTTPS connection addr={} host={}", _state->addr, _host);
-            co_return co_await tls::connect(_state->creds, _state->addr, tls::tls_options{.server_name = _host});
+            co_return co_await tls::connect(_state->creds, _state->addr, tls::tls_options{ .wait_for_eof_on_shutdown = _tls_wait_on_close, .server_name = _host});
         } else {
             _logger.debug("Making new HTTP connection");
             co_return co_await seastar::connect(_state->addr, {}, transport::TCP);
