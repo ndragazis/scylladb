@@ -20,6 +20,8 @@
 
 namespace azure {
 
+auto noop_filter = http_log_filter();
+
 static future<::shared_ptr<tls::certificate_credentials>> make_creds(const sstring& truststore, const sstring& priority_string) {
     auto creds = seastar::make_shared<tls::certificate_credentials>();
     if (!priority_string.empty()) {
@@ -37,7 +39,8 @@ static future<::shared_ptr<tls::certificate_credentials>> make_creds(const sstri
 
 future<sstring> send_request(const sstring& host, int port, const sstring& path,
         bool use_https, const sstring& body, const sstring& mime_type,
-        httpd::operation_type op, key_values headers, logging::logger& logger,
+        httpd::operation_type op, key_values headers,
+        logging::logger& logger, const http_log_filter& filter,
         const sstring& truststore, const sstring& priority_string) {
     auto req = http::request::make(op, host, path);
     req._version = "1.1"; // must be set before calling request_line()
@@ -49,12 +52,14 @@ future<sstring> send_request(const sstring& host, int port, const sstring& path,
         req.set_mime_type(mime_type);
     }
 
-    logger.trace("Sending HTTP request:");
-    logger.trace("http{}://{}:{} \"{}\"", use_https ? "s" : "", host, port, boost::trim_copy(req.request_line()));
-    for (auto& [k, v] : req._headers) {
-        logger.trace("{}: {}", k, v);
+    if (logger.is_enabled(log_level::trace)) {
+        logger.trace("Sending HTTP request:");
+        logger.trace("http{}://{}:{} \"{}\"", use_https ? "s" : "", host, port, boost::trim_copy(req.request_line()));
+        for (auto& [k, v] : req._headers) {
+            logger.trace("{}: {}", k, filter.filter_header(k, v).value_or(v));
+        }
+        logger.trace("{}", filter.filter_body(http_log_filter::body_type::request, body).value_or(body));
     }
-    logger.trace("{}", body);
 
     // Azure Key Vault and Azure Entra do not respond to TLS close_notify alert
     // as they should per the standard: https://www.rfc-editor.org/rfc/rfc5246#section-7.2.1.
@@ -75,13 +80,17 @@ future<sstring> send_request(const sstring& host, int port, const sstring& path,
             auto lin = std::move(in);
             resp = co_await util::read_entire_stream_contiguous(lin);
             if (rep._status == http::reply::status_type::ok) {
-                logger.trace("Got response {}: {}", int(rep._status), resp);
-            } else {
-                logger.trace("Got unexpected response ({})", rep._status);
-                for (auto& [k, v] : rep._headers) {
-                    logger.trace("{}: {}", k, v);
+                if (logger.is_enabled(log_level::trace)) {
+                    logger.trace("Got response {}: {}", int(rep._status), filter.filter_body(http_log_filter::body_type::response, resp).value_or(resp));
                 }
-                logger.trace("{}", resp);
+            } else {
+                if (logger.is_enabled(log_level::trace)) {
+                    logger.trace("Got unexpected response ({})", rep._status);
+                    for (auto& [k, v] : rep._headers) {
+                        logger.trace("{}: {}", k, filter.filter_header(k, v).value_or(v));
+                    }
+                    logger.trace("{}", filter.filter_body(http_log_filter::body_type::response, resp).value_or(resp));
+                }
                 throw seastar::httpd::unexpected_status_error(rep._status);
             }
         }).finally([&] -> future<> { co_await http_client.close(); });
