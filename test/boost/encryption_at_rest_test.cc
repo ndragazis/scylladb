@@ -1222,6 +1222,21 @@ static future<> azure_test_helper(std::function<future<>(const tmpdir&, const az
     co_await f(tmp, env);
 }
 
+SEASTAR_TEST_CASE(test_azure_provider_with_imds) {
+    co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
+        auto yaml = fmt::format(R"foo(
+            azure_hosts:
+                azure_test:
+                    master_key: {0}
+                    imds_endpoint: {1}
+                    )foo"
+            , azure.key_name, azure.imds_endpoint
+        );
+
+        co_await test_provider("'key_provider': 'AzureKeyProviderFactory', 'azure_host': 'azure_test', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
+    }, false);
+}
+
 future<> _test_azure_provider_with_secret(bool real_server) {
     co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
         auto yaml = fmt::format(R"foo(
