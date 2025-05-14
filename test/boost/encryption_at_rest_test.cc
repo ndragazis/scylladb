@@ -28,6 +28,7 @@
 #include "ent/encryption/encryption_exceptions.hh"
 #include "ent/encryption/azure_host.hh"
 #include "test/lib/tmpdir.hh"
+#include "test/lib/test_utils.hh"
 #include "test/lib/random_utils.hh"
 #include "test/lib/cql_test_env.hh"
 #include "test/lib/cql_assertions.hh"
@@ -1156,10 +1157,35 @@ struct azure_test_env {
     std::string user_2_client_id;
     std::string user_2_client_secret;
     std::string user_2_client_certificate;
+    std::string authority_host;
+    std::string imds_endpoint;
 };
 
-static future<> azure_test_helper(std::function<future<>(const tmpdir&, const azure_test_env&)> f) {
-    azure_test_env env {
+static std::string get_mock_azure_addr() {
+    return tests::getenv_safe("MOCK_AZURE_VAULT_SERVER_HOST");
+}
+
+static unsigned long get_mock_azure_port() {
+    return std::stoul(tests::getenv_safe("MOCK_AZURE_VAULT_SERVER_PORT"));
+}
+
+static future<azure_test_env> get_mock_azure_env(const tmpdir& tmp) {
+    co_return azure_test_env {
+        .key_name = fmt::format("http://{}:{}/mock-key", get_mock_azure_addr(), get_mock_azure_port()),
+        .tenant_id = "00000000-1111-2222-3333-444444444444",
+        .user_1_client_id = "mock-client-id",
+        .user_1_client_secret = "mock-client-secret",
+        .user_1_client_certificate = "test/resource/certs/scylla.pem",
+        .user_2_client_id = "mock-client-id-2",
+        .user_2_client_secret = "mock-client-secret-2",
+        .user_2_client_certificate = "test/resource/certs/scylla.pem",
+        .authority_host = fmt::format("http://{}:{}", get_mock_azure_addr(), get_mock_azure_port()),
+        .imds_endpoint = fmt::format("http://{}:{}", get_mock_azure_addr(), get_mock_azure_port()),
+    };
+}
+
+static azure_test_env get_real_azure_env() {
+    return azure_test_env {
         .key_name = get_var_or_default("AZURE_KEY_NAME", ""),
         .tenant_id = get_var_or_default("AZURE_TENANT_ID", ""),
         .user_1_client_id = get_var_or_default("AZURE_USER_1_CLIENT_ID", ""),
@@ -1168,27 +1194,35 @@ static future<> azure_test_helper(std::function<future<>(const tmpdir&, const az
         .user_2_client_id = get_var_or_default("AZURE_USER_2_CLIENT_ID", ""),
         .user_2_client_secret = get_var_or_default("AZURE_USER_2_CLIENT_SECRET", ""),
         .user_2_client_certificate = get_var_or_default("AZURE_USER_2_CLIENT_CERTIFICATE", ""),
+        .authority_host = "",
+        .imds_endpoint = "",
     };
+}
 
+static future<> azure_test_helper(std::function<future<>(const tmpdir&, const azure_test_env&)> f, bool real_server = false) {
     tmpdir tmp;
 
-    if (env.key_name.empty()) {
-        BOOST_ERROR("No 'AZURE_KEY_NAME' provided");
-    }
-    if (env.tenant_id.empty()) {
-        BOOST_ERROR("No 'AZURE_TENANT_ID' provided");
-    }
-    if (env.user_1_client_id.empty() || env.user_1_client_secret.empty() || env.user_1_client_certificate.empty()) {
-        BOOST_ERROR("Missing or incompete credentials for user 1: All three of 'AZURE_USER_1_CLIENT_ID', 'AZURE_USER_1_CLIENT_SECRET' and 'AZURE_USER_1_CLIENT_CERTIFICATE' must be provided");
-    }
-    if (env.user_2_client_id.empty() || env.user_2_client_secret.empty() || env.user_2_client_certificate.empty()) {
-        BOOST_ERROR("Missing or incompete credentials for user 2: All three of 'AZURE_USER_2_CLIENT_ID', 'AZURE_USER_2_CLIENT_SECRET' and 'AZURE_USER_2_CLIENT_CERTIFICATE' must be provided");
+    auto env = real_server ? get_real_azure_env() : co_await get_mock_azure_env(tmp);
+
+    if (real_server) {
+        if (env.key_name.empty()) {
+            BOOST_ERROR("No 'AZURE_KEY_NAME' provided");
+        }
+        if (env.tenant_id.empty()) {
+            BOOST_ERROR("No 'AZURE_TENANT_ID' provided");
+        }
+        if (env.user_1_client_id.empty() || env.user_1_client_secret.empty() || env.user_1_client_certificate.empty()) {
+            BOOST_ERROR("Missing or incompete credentials for user 1: All three of 'AZURE_USER_1_CLIENT_ID', 'AZURE_USER_1_CLIENT_SECRET' and 'AZURE_USER_1_CLIENT_CERTIFICATE' must be provided");
+        }
+        if (env.user_2_client_id.empty() || env.user_2_client_secret.empty() || env.user_2_client_certificate.empty()) {
+            BOOST_ERROR("Missing or incompete credentials for user 2: All three of 'AZURE_USER_2_CLIENT_ID', 'AZURE_USER_2_CLIENT_SECRET' and 'AZURE_USER_2_CLIENT_CERTIFICATE' must be provided");
+        }
     }
 
     co_await f(tmp, env);
 }
 
-SEASTAR_TEST_CASE(test_azure_provider_with_secret, *check_run_test_decorator("ENABLE_AZURE_TEST")) {
+future<> _test_azure_provider_with_secret(bool real_server) {
     co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
         auto yaml = fmt::format(R"foo(
             azure_hosts:
@@ -1197,15 +1231,24 @@ SEASTAR_TEST_CASE(test_azure_provider_with_secret, *check_run_test_decorator("EN
                     azure_tenant_id: {1}
                     azure_client_id: {2}
                     azure_client_secret: {3}
+                    azure_authority_host: {5}
                     )foo"
-            , azure.key_name, azure.tenant_id, azure.user_1_client_id, azure.user_1_client_secret, azure.user_1_client_certificate
+            , azure.key_name, azure.tenant_id, azure.user_1_client_id, azure.user_1_client_secret, azure.user_1_client_certificate, azure.authority_host
         );
 
         co_await test_provider("'key_provider': 'AzureKeyProviderFactory', 'azure_host': 'azure_test', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
-    });
+    }, real_server);
 }
 
-SEASTAR_TEST_CASE(test_azure_provider_with_certificate, *check_run_test_decorator("ENABLE_AZURE_TEST")) {
+SEASTAR_TEST_CASE(test_azure_provider_with_secret) {
+    co_await _test_azure_provider_with_secret(false);
+}
+
+SEASTAR_TEST_CASE(test_azure_provider_with_secret_real, *check_run_test_decorator("ENABLE_AZURE_REAL_TEST")) {
+    co_await _test_azure_provider_with_secret(true);
+}
+
+future<> _test_azure_provider_with_certificate(bool real_server) {
     co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
         auto yaml = fmt::format(R"foo(
             azure_hosts:
@@ -1214,12 +1257,21 @@ SEASTAR_TEST_CASE(test_azure_provider_with_certificate, *check_run_test_decorato
                     azure_tenant_id: {1}
                     azure_client_id: {2}
                     azure_client_certificate_path: {4}
+                    azure_authority_host: {5}
                     )foo"
-            , azure.key_name, azure.tenant_id, azure.user_1_client_id, azure.user_1_client_secret, azure.user_1_client_certificate
+            , azure.key_name, azure.tenant_id, azure.user_1_client_id, azure.user_1_client_secret, azure.user_1_client_certificate, azure.authority_host
         );
 
         co_await test_provider("'key_provider': 'AzureKeyProviderFactory', 'azure_host': 'azure_test', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", tmp, yaml);
-    });
+    }, real_server);
+}
+
+SEASTAR_TEST_CASE(test_azure_provider_with_certificate) {
+    co_await _test_azure_provider_with_certificate(false);
+}
+
+SEASTAR_TEST_CASE(test_azure_provider_with_certificate_real, *check_run_test_decorator("ENABLE_AZURE_REAL_TEST")) {
+    co_await _test_azure_provider_with_certificate(true);
 }
 
 SEASTAR_TEST_CASE(test_azure_provider_with_master_key_in_cf, *check_run_test_decorator("ENABLE_AZURE_TEST")) {
