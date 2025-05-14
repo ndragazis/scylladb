@@ -26,6 +26,10 @@ class service_principal_credentials : public credentials {
     // TLS options.
     sstring _truststore;
     sstring _priority_string;
+    // Endpoint
+    sstring _host;
+    unsigned _port;
+    bool _is_secured;
 
     const char* get_name() const override { return NAME; };
     future<sstring> post(const sstring& body);
@@ -36,6 +40,7 @@ class service_principal_credentials : public credentials {
 public:
     service_principal_credentials(const sstring& tenant_id, const sstring& client_id,
             const sstring& client_secret, const sstring& client_cert,
+            const sstring& authority,
             const sstring& truststore = "", const sstring& priority_string = "",
             const sstring& logctx = "");
 };

@@ -9,6 +9,7 @@
 
 #define CPP_JWT_USE_VENDORED_NLOHMANN_JSON
 #include <jwt/jwt.hpp>
+#include <boost/regex.hpp>
 
 #include <seastar/net/dns.hh>
 #include <seastar/core/coroutine.hh>
@@ -69,9 +70,8 @@ static body_filter make_response_filter() {
 // A very simple tls connection factory.
 //
 // Differences from `seastar::http::experimental::tls_connection_factory`:
-// 1. Accepts external certificate credentials.
-// 2. Does not support non-TLS connections.
-// 3. Does not wait after TLS close_notify alerts (necessary for Azure Entra).
+// 1. Does not wait after TLS close_notify alerts (necessary for Azure Entra).
+// 2. Does not verify the host name if the host is an IP address.
 class tls_connection_factory : public http::experimental::connection_factory {
     static constexpr bool TLS_NOWAIT_ON_CLOSE = false;
     socket_address _addr;
@@ -84,13 +84,17 @@ public:
         , _host(std::move(host))
     {}
     future<connected_socket> make(abort_source* as) override {
-        co_return co_await tls::connect(_creds, _addr, tls::tls_options{ .wait_for_eof_on_shutdown = TLS_NOWAIT_ON_CLOSE, .server_name = _host});
+        // don't verify host cert name if "host" is just an ip address.
+        // typically testing.
+        bool is_numeric_host = seastar::net::inet_address::parse_numerical(_host).has_value();
+        co_return co_await tls::connect(_creds, _addr, tls::tls_options{ .wait_for_eof_on_shutdown = TLS_NOWAIT_ON_CLOSE, .server_name = is_numeric_host ? sstring{} : _host});
      }
  };
 
 service_principal_credentials::service_principal_credentials(const sstring& tenant_id,
         const sstring& client_id, const sstring& client_secret, const sstring& client_cert,
-        const sstring& truststore, const sstring& priority_string, const sstring& logctx)
+        const sstring& authority, const sstring& truststore, const sstring& priority_string,
+        const sstring& logctx)
     : credentials(logctx)
     , _tenant_id(tenant_id)
     , _client_id(client_id)
@@ -98,7 +102,31 @@ service_principal_credentials::service_principal_credentials(const sstring& tena
     , _client_cert(client_cert)
     , _truststore(truststore)
     , _priority_string(priority_string)
-{}
+    , _host(AZURE_ENTRA_ID_HOST)
+    , _port(443)
+    , _is_secured(true)
+{
+    if (authority.empty()) {
+        return;
+    }
+    static const boost::regex uri_pattern(R"((?:(https?):\/\/)?([^/:]+)(?::(\d+))?)");
+    boost::smatch match;
+    std::string tmp{authority};
+    if (boost::regex_match(tmp, match, uri_pattern)) {
+        std::string scheme = match[1];
+        std::string host = match[2];
+        std::string port_str = match[3];
+        if (!scheme.empty()) {
+            _is_secured = (scheme == "https");
+        }
+        if (!port_str.empty()) {
+            _port = std::stoi(port_str);
+        }
+        _host = host;
+    } else {
+        throw std::invalid_argument(fmt::format("Invalid authority format: {}", authority));
+    }
+}
 
 static future<::shared_ptr<tls::certificate_credentials>> make_creds(const sstring& truststore, const sstring& priority_string) {
     auto creds = seastar::make_shared<tls::certificate_credentials>();
@@ -117,12 +145,10 @@ static future<::shared_ptr<tls::certificate_credentials>> make_creds(const sstri
 
 future<sstring> service_principal_credentials::post(const sstring& body) {
     const auto op = httpd::operation_type::POST;
-    const auto host = AZURE_ENTRA_ID_HOST;
-    const auto port = 443;
     const auto path = seastar::format(AZURE_ENTRA_ID_TOKEN_PATH_TEMPLATE, _tenant_id);
     const auto mime_type = MIME_TYPE;
 
-    auto req = http::request::make(op, host, path);
+    auto req = http::request::make(op, _host, path);
     req._version = "1.1";
     req.write_body("", std::move(body));
     req.set_mime_type(mime_type);
@@ -131,8 +157,14 @@ future<sstring> service_principal_credentials::post(const sstring& body) {
         log_trace("Sending request: {}", format_request(req, make_request_filter()));
     }
 
-    auto addr = co_await net::dns::resolve_name(host, net::inet_address::family::INET);
-    auto factory = std::make_unique<azure::tls_connection_factory>(socket_address(addr, port), co_await make_creds(_truststore, _priority_string), host);
+    auto addr = co_await net::dns::resolve_name(_host, net::inet_address::family::INET);
+    std::unique_ptr<http::experimental::connection_factory> factory;
+    socket_address sockaddr {addr, uint16_t(_port)};
+    if (_is_secured) {
+        factory = std::make_unique<tls_connection_factory>(sockaddr, co_await make_creds(_truststore, _priority_string), _host);
+    } else {
+        factory = std::make_unique<http::experimental::basic_connection_factory>(sockaddr);
+    }
     http::experimental::client http_client{std::move(factory)};
 
     sstring resp;
