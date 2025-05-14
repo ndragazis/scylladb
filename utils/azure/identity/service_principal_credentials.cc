@@ -35,16 +35,16 @@ static body_filter make_request_filter() {
     return [](std::string_view body) -> std::optional<std::string> {
         for (const auto& param : {"client_secret=", "client_assertion="}) {
             size_t start_pos = body.find(param);
-            if (start_pos == sstring::npos) {
+            if (start_pos == std::string::npos) {
                 continue;
             }
-            size_t value_start_pos = start_pos + sstring(param).length();
+            size_t value_start_pos = start_pos + std::string(param).length();
             size_t end_pos = body.find('&', value_start_pos);
-            if (end_pos == sstring::npos) {
+            if (end_pos == std::string::npos) {
                 end_pos = body.length();
             }
             return fmt::format("{}{}{}",
-                    body.substr(0, start_pos + sstring(param).length()),
+                    body.substr(0, start_pos + std::string(param).length()),
                     REDACTED_VALUE,
                     body.substr(end_pos));
         }
