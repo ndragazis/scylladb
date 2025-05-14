@@ -139,9 +139,10 @@ private:
     static constexpr char AKV_TOKEN_RESOURCE_URI[] = "https://vault.azure.net"; // no trailing slash
 
     static std::tuple<std::string, std::string> parse_key(std::string_view);
+    static std::tuple<std::string, std::string, int> parse_vault(std::string_view vault);
     future<shared_ptr<tls::certificate_credentials>> make_creds();
-    future<rjson::value> send_request(const sstring& host, const sstring& path, const rjson::value& body, shared_ptr<encryption::http_log_filter> filter);
-    future<rjson::value> send_request_with_retry(const sstring& host, const sstring& path, const rjson::value& body, shared_ptr<encryption::http_log_filter> filter);
+    future<rjson::value> send_request(const sstring& host, unsigned port, bool use_https, const sstring& path, const rjson::value& body, shared_ptr<encryption::http_log_filter> filter);
+    future<rjson::value> send_request_with_retry(const sstring& host, unsigned port, bool use_https, const sstring& path, const rjson::value& body, shared_ptr<encryption::http_log_filter> filter);
     future<key_and_id_type> create_key(const attr_cache_key&);
     future<bytes> find_key(const id_cache_key&);
 };
@@ -260,6 +261,29 @@ std::tuple<std::string, std::string> azure_host::impl::parse_key(std::string_vie
     return std::make_tuple(std::string(spec.substr(0, i)), std::string(spec.substr(i + 1)));
 }
 
+std::tuple<std::string, std::string, int> azure_host::impl::parse_vault(std::string_view vault) {
+    if (!vault.starts_with("http://") && !vault.starts_with("https://")) {
+        return {"https", fmt::format(AKV_HOST_TEMPLATE, vault), 443};
+    }
+
+    static boost::regex re(R"((https?)://([^/:]+)(?::(\d+))?)");
+    boost::smatch match;
+
+    std::string tmp{vault};
+
+    if (!boost::regex_match(tmp, match, re)) {
+        throw std::invalid_argument(fmt::format("Invalid vault endpoint '{}'. Must be in format http(s)://<host>(:port)", vault));
+    }
+
+    std::string scheme = match[1];
+    std::string host = match[2];
+    std::string port_str = match[3];
+
+    uint16_t port = (port_str.empty()) ? (scheme == "https" ? 443 : 80) : std::stoi(port_str);
+
+    return {scheme, host, port};
+}
+
 future<shared_ptr<tls::certificate_credentials>> azure_host::impl::make_creds() {
     auto creds = ::make_shared<tls::certificate_credentials>();
     if (!_options.priority_string.empty()) {
@@ -275,12 +299,12 @@ future<shared_ptr<tls::certificate_credentials>> azure_host::impl::make_creds() 
     co_return creds;
 }
 
-future<rjson::value> azure_host::impl::send_request_with_retry(const sstring& host, const sstring& path, const rjson::value& body, shared_ptr<encryption::http_log_filter> filter) {
+future<rjson::value> azure_host::impl::send_request_with_retry(const sstring& host, unsigned port, bool use_https, const sstring& path, const rjson::value& body, shared_ptr<encryption::http_log_filter> filter) {
     constexpr int MAX_RETRIES = 3;
     int retries = 0;
     for (;;) {
         try {
-            co_return co_await send_request(host, path, body, filter);
+            co_return co_await send_request(host, port, use_https, path, body, filter);
         } catch (azure::auth_error& e) {
             std::throw_with_nested(permission_error(fmt::format("{}/{}", host, path)));
         } catch (vault_error& e) {
@@ -299,12 +323,11 @@ future<rjson::value> azure_host::impl::send_request_with_retry(const sstring& ho
     }
 }
 
-future<rjson::value> azure_host::impl::send_request(const sstring& host, const sstring& path, const rjson::value& body, shared_ptr<encryption::http_log_filter> filter) {
+future<rjson::value> azure_host::impl::send_request(const sstring& host, unsigned port, bool use_https, const sstring& path, const rjson::value& body, shared_ptr<encryption::http_log_filter> filter) {
     auto token = co_await _credentials->get_access_token(AKV_TOKEN_RESOURCE_URI);
 
-    auto creds = co_await make_creds();
+    auto creds = use_https ? co_await make_creds() : nullptr;
     auto mime_type = "application/json";
-    auto port = 443;
 
     httpclient client(host, port, std::move(creds), false);
     client.target(path);
@@ -340,8 +363,8 @@ future<azure_host::key_and_id_type> azure_host::impl::create_key(const attr_cach
     }
     azlog.debug("[{}] Creating new key: {}", _log_prefix, info);
     auto [vault, keyname] = parse_key(k.master_key);
+    auto [scheme, host, port] = parse_vault(vault);
     auto key = make_shared<symmetric_key>(info);
-    auto host = fmt::format(AKV_HOST_TEMPLATE, vault);
     auto path = fmt::format(AKV_PATH_TEMPLATE, keyname, AKV_LATEST_VERSION, AKV_WRAPKEY_OP);
     auto body = [&key] {
         auto b = rjson::empty_object();
@@ -351,7 +374,7 @@ future<azure_host::key_and_id_type> azure_host::impl::create_key(const attr_cach
     }();
     rjson::value resp;
     try {
-        resp = co_await send_request_with_retry(host, path, body, make_shared<vault_log_filter>(vault_log_filter::op_type::wrapkey));
+        resp = co_await send_request_with_retry(host, port, scheme == "https" ? true : false, path, body, make_shared<vault_log_filter>(vault_log_filter::op_type::wrapkey));
     } catch (...) {
         azlog.error("[{}] Failed to wrap key {} with master_key={}: {}", _log_prefix, info, k.master_key, std::current_exception());
         throw;
@@ -384,7 +407,7 @@ future<bytes> azure_host::impl::find_key(const id_cache_key& k) {
     azlog.debug("[{}] Finding key: {}", _log_prefix, id);
 
     auto [vault, keyname, version, cipher] = [&id] {
-        boost::regex id_regex(R"foo(([^/]+)/([^/]+)/([^:]+):(.+))foo");
+        boost::regex id_regex(R"foo(((?:https?://[^/]+)|[^/]+)/([^/]+)/([^:]+):(.+))foo");
         boost::match_results<std::string_view::const_iterator> match;
         if (!boost::regex_search(id.begin(), id.end(), match, id_regex)) {
             throw std::invalid_argument(fmt::format("Not a valid key id: {}", id));
@@ -392,7 +415,7 @@ future<bytes> azure_host::impl::find_key(const id_cache_key& k) {
         return std::make_tuple(match[1].str(), match[2].str(), match[3].str(), match[4].str());
     }();
 
-    auto host = seastar::format(AKV_HOST_TEMPLATE, vault);
+    auto [scheme, host, port] = parse_vault(vault);
     auto path = seastar::format(AKV_PATH_TEMPLATE, keyname, version, AKV_UNWRAPKEY_OP);
     auto body = [&cipher] {
         auto b = rjson::empty_object();
@@ -402,7 +425,7 @@ future<bytes> azure_host::impl::find_key(const id_cache_key& k) {
     }();
     rjson::value resp;
     try {
-        resp = co_await send_request_with_retry(host, path, body, make_shared<vault_log_filter>(vault_log_filter::op_type::unwrapkey));
+        resp = co_await send_request_with_retry(host, port, scheme == "https" ? true : false, path, body, make_shared<vault_log_filter>(vault_log_filter::op_type::unwrapkey));
     } catch (...) {
         azlog.error("[{}] Failed to unwrap key {}: {}", _log_prefix, k.id, std::current_exception());
         throw;
