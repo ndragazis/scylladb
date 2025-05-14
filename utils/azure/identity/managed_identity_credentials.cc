@@ -7,6 +7,9 @@
  * SPDX-License-Identifier: LicenseRef-ScyllaDB-Source-Available-1.0
  */
 
+#include <boost/regex.hpp>
+
+#include <seastar/net/dns.hh>
 #include <seastar/net/inet_address.hh>
 #include <seastar/http/client.hh>
 #include <seastar/http/common.hh>
@@ -35,9 +38,32 @@ static body_filter make_response_filter() {
     };
 }
 
-managed_identity_credentials::managed_identity_credentials(const sstring& logctx)
+managed_identity_credentials::managed_identity_credentials(const sstring& endpoint, const sstring& logctx)
     : credentials(logctx)
-{}
+    , _host(IMDS_HOST)
+    , _port(IMDS_PORT)
+{
+    if (endpoint.empty()) {
+        return;
+    }
+    static const boost::regex uri_pattern(R"((?:(https?):\/\/)?([^/:]+)(?::(\d+))?)");
+    boost::smatch match;
+    std::string tmp{endpoint};
+    if (boost::regex_match(tmp, match, uri_pattern)) {
+        std::string scheme = match[1];
+        std::string host = match[2];
+        std::string port_str = match[3];
+        if (!scheme.empty() && scheme != "http") {
+            throw std::invalid_argument(fmt::format("Unsupported scheme: {}", scheme));
+        }
+        _host = host;
+        if (!port_str.empty()) {
+            _port = std::stoi(port_str);
+        }
+    } else {
+        throw std::invalid_argument(fmt::format("Invalid endpoint format: {}", endpoint));
+    }
+}
 
 access_token managed_identity_credentials::make_token(const rjson::value& json, const resource_type& resource_uri) {
     auto token = rjson::get<std::string>(json, "access_token");
@@ -54,11 +80,9 @@ future<> managed_identity_credentials::refresh(const resource_type& resource_uri
     log_debug("Refreshing token");
 
     const auto op = httpd::operation_type::GET;
-    const auto host = IMDS_HOST;
-    const auto port = 80;
     const auto path = seastar::format(IMDS_TOKEN_PATH_TEMPLATE, IMDS_API_VERSION, resource_uri);
 
-    auto req = http::request::make(op, host, path);
+    auto req = http::request::make(op, _host, path);
     req._version = "1.1";
     req._headers["Metadata"] = "true";
 
@@ -66,8 +90,8 @@ future<> managed_identity_credentials::refresh(const resource_type& resource_uri
         log_trace("Sending request: {}", format_request(req));
     }
 
-    auto addr = seastar::net::inet_address(host);
-    auto factory = std::make_unique<seastar::http::experimental::basic_connection_factory>(socket_address(addr, port));
+    auto addr = co_await net::dns::resolve_name(_host, net::inet_address::family::INET);
+    auto factory = std::make_unique<seastar::http::experimental::basic_connection_factory>(socket_address(addr, uint64_t(_port)));
     http::experimental::client http_client{std::move(factory)};
 
     sstring resp;

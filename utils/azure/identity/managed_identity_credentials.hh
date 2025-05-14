@@ -17,14 +17,18 @@ namespace azure {
 class managed_identity_credentials : public credentials {
     static constexpr char NAME[] = "ManagedIdentityCredentials";
     static constexpr char IMDS_HOST[] = "169.254.169.254";
+    static constexpr unsigned IMDS_PORT = 80;
     static constexpr char IMDS_API_VERSION[] = "2018-02-01";
     static constexpr char IMDS_TOKEN_PATH_TEMPLATE[] = "/metadata/identity/oauth2/token?api-version={}&resource={}";
+
+    sstring _host;
+    unsigned _port;
 
     const char* get_name() const override { return NAME; };
     future<> refresh(const resource_type& resource_uri) override;
     access_token make_token(const rjson::value&, const resource_type&);
 public:
-    managed_identity_credentials(const sstring& logctx = "");
+    managed_identity_credentials(const sstring& endpoint = "", const sstring& logctx = "");
 };
 
 }
