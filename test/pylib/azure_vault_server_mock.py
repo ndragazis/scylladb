@@ -99,6 +99,8 @@ class AzureVault:
                 label=None
             ))
 
+    INVALID_KEY = "nonexistentkey"
+
     ERROR_TEMPLATES = {
         'KeyNotFound': (404, {
             "error": {
@@ -155,6 +157,8 @@ class AzureVault:
 
     def wrapkey(self, data: str, key_name: str, key_version: str = None):
         try:
+            if key_name == self.INVALID_KEY:
+                return self._error_response('Forbidden')
             j = json.loads(data)
             alg, value = j['alg'], j['value']
             # TODO: Validate the algorithm, we only support RSA-OAEP-SHA256
@@ -177,6 +181,8 @@ class AzureVault:
 
     def unwrapkey(self, data: str, key_name: str, key_version: str = None):
         try:
+            if key_name == self.INVALID_KEY:
+                return self._error_response('Forbidden')
             j = json.loads(data)
             alg, value = j['alg'], j['value']
             # TODO: Validate the algorithm, we only support RSA-OAEP-SHA256
