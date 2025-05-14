@@ -51,6 +51,8 @@ background-color:#555555;}
 </html>
 """
 
+INVALID_CLIENT_ID = "mock-client-id-invalid"
+
 class AzureVault:
     """
     Azure Key Vault service.
@@ -322,7 +324,7 @@ class AzureEntraSTS:
         if 'client_assertion' in form_data and 'client_assertion_type' not in form_data:
             return self._error_response('invalid_request', missing_params='client_assertion_type')
 
-        client_id=form_data['client_id'][0],
+        client_id=form_data['client_id'][0]
         resource = form_data['scope'][0].removesuffix('.default')
 
         token = self.generate_fake_jwt(client_id, tenant_id, resource)
@@ -347,6 +349,13 @@ class RequestHandler(BaseHTTPRequestHandler):
     entra_token_re = re.compile(r'^/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/oauth2/v2\.0/token$')
     imds_token_path = '/metadata/identity/oauth2/token'
 
+    def __init__(self, vault, imds, entra, logger, *args, **kwargs):
+        self.vault = vault
+        self.imds = imds
+        self.entra = entra
+        self.logger = logger
+        super().__init__(*args, **kwargs)
+
     def handle_one_request(self):
         # Check for TLS handshake (first byte is typically 0x16 in TLS)
         try:
@@ -359,12 +368,20 @@ class RequestHandler(BaseHTTPRequestHandler):
             pass
         super().handle_one_request()
 
-    def __init__(self, vault, imds, entra, logger, *args, **kwargs):
-        self.vault = vault
-        self.imds = imds
-        self.entra = entra
-        self.logger = logger
-        super().__init__(*args, **kwargs)
+    def _extract_client_id(self):
+        """Extract client ID from Authorization header if present"""
+        auth_header = self.headers.get('Authorization', '')
+        if auth_header.startswith('Bearer '):
+            try:
+                token = auth_header[7:]
+                parts = token.split('.')
+                if len(parts) >= 2:
+                    padding = '=' * (4 - len(parts[1]) % 4)
+                    payload = json.loads(base64.urlsafe_b64decode(parts[1] + padding).decode('utf-8'))
+                    return payload.get('appid')
+            except Exception:
+                pass
+        return None
 
     def _send_response(self, status_code, mime_type, response):
         self.send_response(status_code)
@@ -392,6 +409,11 @@ class RequestHandler(BaseHTTPRequestHandler):
             key_name, key_version, operation, _ = match.groups()
             content_length = self.headers['Content-Length']
             data = self.rfile.read(int(content_length) if content_length else -1)
+
+            if self._extract_client_id() == INVALID_CLIENT_ID:
+                status, resp = self.vault._error_response('Forbidden')
+                self._send_response(status, 'application/json', json.dumps(resp).encode('utf-8'))
+                return
 
             if operation == 'wrapkey':
                 status, resp = self.vault.wrapkey(data, key_name, key_version)
