@@ -166,13 +166,13 @@ azure_host::impl::impl(encryption_context& ctxt, const std::string& name, const 
     if (!_options.tenant_id.empty() && !_options.client_id.empty() && (!_options.client_secret.empty() || !_options.client_cert.empty())) {
         _credentials = std::make_unique<azure::service_principal_credentials>(
                 options.tenant_id, options.client_id, options.client_secret, options.client_cert,
-                options.truststore, options.priority_string, _log_prefix);
+                options.authority, options.truststore, options.priority_string, _log_prefix);
         return;
     }
     azlog.info("[{}] No credentials configured. Falling back to default credentials.", _log_prefix);
     _credentials = std::make_unique<azure::default_credentials>(
-            azure::default_credentials::all_sources, _options.truststore,
-            _options.priority_string, _log_prefix);
+            azure::default_credentials::all_sources, _options.imds_endpoint,
+            _options.truststore, options.priority_string, _log_prefix);
 }
 
 /**
@@ -449,6 +449,8 @@ azure_host::azure_host(encryption_context& ctxt, const std::string& name, const 
         opts.client_id = m("azure_client_id").value_or("");
         opts.client_secret = m("azure_client_secret").value_or("");
         opts.client_cert = m("azure_client_certificate_path").value_or("");
+        opts.authority = m("azure_authority_host").value_or("");
+        opts.imds_endpoint = m("imds_endpoint").value_or("");
 
         opts.master_key = m("master_key").value_or("");
 

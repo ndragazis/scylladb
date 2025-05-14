@@ -65,6 +65,8 @@ public:
         std::string client_id;
         std::string client_secret;
         std::string client_cert;
+        std::string authority;
+        std::string imds_endpoint;
 
         // Azure Key Vault Key to encrypt data keys with. Format: <vault name>/<keyname>
         std::string master_key;
