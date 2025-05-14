@@ -1361,9 +1361,9 @@ SEASTAR_TEST_CASE(test_azure_provider_with_incomplete_creds) {
     }, false);
 }
 
-SEASTAR_TEST_CASE(test_azure_provider_with_invalid_key, *check_run_test_decorator("ENABLE_AZURE_TEST")) {
+future<> _test_azure_provider_with_invalid_key(bool real_server) {
     co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
-        auto vault = azure.key_name.substr(0, azure.key_name.find('/'));
+        auto vault = azure.key_name.substr(0, azure.key_name.rfind('/'));
         auto master_key = fmt::format("{}/nonexistentkey", vault);
         auto yaml = fmt::format(R"foo(
             azure_hosts:
@@ -1372,8 +1372,9 @@ SEASTAR_TEST_CASE(test_azure_provider_with_invalid_key, *check_run_test_decorato
                     azure_tenant_id: {1}
                     azure_client_id: {2}
                     azure_client_secret: {3}
+                    azure_authority_host: {5}
                     )foo"
-            , master_key, azure.tenant_id, azure.user_1_client_id, azure.user_1_client_secret, azure.user_1_client_certificate
+            , master_key, azure.tenant_id, azure.user_1_client_id, azure.user_1_client_secret, azure.user_1_client_certificate, azure.authority_host
         );
 
         // should fail
@@ -1390,7 +1391,15 @@ SEASTAR_TEST_CASE(test_azure_provider_with_invalid_key, *check_run_test_decorato
                 return false; // No nested exception
             }
         );
-    });
+    }, real_server);
+}
+
+SEASTAR_TEST_CASE(test_azure_provider_with_invalid_key) {
+    co_await _test_azure_provider_with_invalid_key(false);
+}
+
+SEASTAR_TEST_CASE(test_azure_provider_with_invalid_key_real, *check_run_test_decorator("ENABLE_AZURE_REAL_TEST")) {
+    co_await _test_azure_provider_with_invalid_key(true);
 }
 
 /**
