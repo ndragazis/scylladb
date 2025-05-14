@@ -1176,8 +1176,8 @@ static future<azure_test_env> get_mock_azure_env(const tmpdir& tmp) {
         .user_1_client_id = "mock-client-id",
         .user_1_client_secret = "mock-client-secret",
         .user_1_client_certificate = "test/resource/certs/scylla.pem",
-        .user_2_client_id = "mock-client-id-2",
-        .user_2_client_secret = "mock-client-secret-2",
+        .user_2_client_id = "mock-client-id-invalid",
+        .user_2_client_secret = "mock-client-secret-invalid",
         .user_2_client_certificate = "test/resource/certs/scylla.pem",
         .authority_host = fmt::format("http://{}:{}", get_mock_azure_addr(), get_mock_azure_port()),
         .imds_endpoint = fmt::format("http://{}:{}", get_mock_azure_addr(), get_mock_azure_port()),
@@ -1397,7 +1397,7 @@ SEASTAR_TEST_CASE(test_azure_provider_with_invalid_key, *check_run_test_decorato
  * Verify that trying to access key materials with a user w/o permissions to wrap/unwrap using vault
  * fails.
 */
-SEASTAR_TEST_CASE(test_azure_provider_with_invalid_user, *check_run_test_decorator("ENABLE_AZURE_TEST")) {
+future<> _test_azure_provider_with_invalid_user(bool real_server) {
     co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
         auto yaml = fmt::format(R"foo(
             azure_hosts:
@@ -1406,8 +1406,9 @@ SEASTAR_TEST_CASE(test_azure_provider_with_invalid_user, *check_run_test_decorat
                     azure_tenant_id: {1}
                     azure_client_id: {2}
                     azure_client_secret: {3}
+                    azure_authority_host: {5}
                     )foo"
-            , azure.key_name, azure.tenant_id, azure.user_2_client_id, azure.user_2_client_secret, azure.user_2_client_certificate
+            , azure.key_name, azure.tenant_id, azure.user_2_client_id, azure.user_2_client_secret, azure.user_2_client_certificate, azure.authority_host
         );
 
         // should fail
@@ -1424,7 +1425,15 @@ SEASTAR_TEST_CASE(test_azure_provider_with_invalid_user, *check_run_test_decorat
                 return false; // No nested exception
             }
         );
-    });
+    }, real_server);
+}
+
+SEASTAR_TEST_CASE(test_azure_provider_with_invalid_user) {
+    co_await _test_azure_provider_with_invalid_user(false);
+}
+
+SEASTAR_TEST_CASE(test_azure_provider_with_invalid_user_real, *check_run_test_decorator("ENABLE_AZURE_REAL_TEST")) {
+    co_await _test_azure_provider_with_invalid_user(true);
 }
 
 /**
