@@ -1274,7 +1274,7 @@ SEASTAR_TEST_CASE(test_azure_provider_with_certificate_real, *check_run_test_dec
     co_await _test_azure_provider_with_certificate(true);
 }
 
-SEASTAR_TEST_CASE(test_azure_provider_with_master_key_in_cf, *check_run_test_decorator("ENABLE_AZURE_TEST")) {
+SEASTAR_TEST_CASE(test_azure_provider_with_master_key_in_cf) {
     co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
         auto yaml = fmt::format(R"foo(
             azure_hosts:
@@ -1282,8 +1282,9 @@ SEASTAR_TEST_CASE(test_azure_provider_with_master_key_in_cf, *check_run_test_dec
                     azure_tenant_id: {1}
                     azure_client_id: {2}
                     azure_client_secret: {3}
+                    azure_authority_host: {5}
                     )foo"
-            , azure.key_name, azure.tenant_id, azure.user_1_client_id, azure.user_1_client_secret, azure.user_1_client_certificate
+            , azure.key_name, azure.tenant_id, azure.user_1_client_id, azure.user_1_client_secret, azure.user_1_client_certificate, azure.authority_host
         );
 
         // should fail
@@ -1305,10 +1306,10 @@ SEASTAR_TEST_CASE(test_azure_provider_with_master_key_in_cf, *check_run_test_dec
         co_await test_provider(fmt::format("'key_provider': 'AzureKeyProviderFactory', 'azure_host': 'azure_test', 'master_key': '{}', 'cipher_algorithm':'AES/CBC/PKCS5Padding', 'secret_key_strength': 128", azure.key_name)
             , tmp, yaml
             );
-    });
+    }, false);
 }
 
-SEASTAR_TEST_CASE(test_azure_provider_with_no_host, *check_run_test_decorator("ENABLE_AZURE_TEST")) {
+SEASTAR_TEST_CASE(test_azure_provider_with_no_host) {
     co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
         auto yaml = R"foo(
             azure_hosts:
@@ -1322,7 +1323,7 @@ SEASTAR_TEST_CASE(test_azure_provider_with_no_host, *check_run_test_decorator("E
                 return sstring(e.what()).find("No such host") != sstring::npos;
             }
         );
-    });
+    }, false);
 }
 
 /**
@@ -1331,7 +1332,7 @@ SEASTAR_TEST_CASE(test_azure_provider_with_no_host, *check_run_test_decorator("E
  * credentials source to detect credentials from the system (env vars, Azure CLI,
  * IMDS), and only after all these attempts fail will it throw.
 */
-SEASTAR_TEST_CASE(test_azure_provider_with_incomplete_creds, *check_run_test_decorator("ENABLE_AZURE_TEST")) {
+SEASTAR_TEST_CASE(test_azure_provider_with_incomplete_creds) {
     co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
         auto yaml = fmt::format(R"foo(
             azure_hosts:
@@ -1357,7 +1358,7 @@ SEASTAR_TEST_CASE(test_azure_provider_with_incomplete_creds, *check_run_test_dec
                 return false; // No nested exception
             }
         );
-    });
+    }, false);
 }
 
 SEASTAR_TEST_CASE(test_azure_provider_with_invalid_key, *check_run_test_decorator("ENABLE_AZURE_TEST")) {
