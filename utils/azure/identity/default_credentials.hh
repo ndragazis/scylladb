@@ -28,6 +28,7 @@ public:
     static constexpr source_set all_sources = source_set::full();
 
     default_credentials(const source_set& sources = all_sources,
+            const sstring& imds_endpoint = "",
             const sstring& truststore = "",
             const sstring& priority_string = "",
             const sstring& logctx = "");
@@ -38,6 +39,8 @@ private:
     // TLS options.
     sstring _truststore;
     sstring _priority_string;
+
+    sstring _imds_endpoint;
 
     const char* get_name() const override { return NAME; };
     future<> refresh(const resource_type& resource_uri) override;

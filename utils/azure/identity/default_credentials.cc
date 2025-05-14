@@ -20,11 +20,13 @@
 namespace azure {
 
 default_credentials::default_credentials(const source_set& sources,
-        const sstring& truststore, const sstring& priority_string, const sstring& logctx)
+        const sstring& imds_endpoint, const sstring& truststore,
+        const sstring& priority_string, const sstring& logctx)
     : credentials(logctx)
     , _sources(sources)
     , _truststore(truststore)
     , _priority_string(priority_string)
+    , _imds_endpoint(imds_endpoint)
 {}
 
 future<> default_credentials::refresh(const resource_type& resource_uri) {
@@ -129,7 +131,7 @@ future<default_credentials::credentials_opt> default_credentials::get_credential
  */
 future<default_credentials::credentials_opt> default_credentials::get_credentials_from_imds(const resource_type& resource_uri) {
     const auto timeout = std::chrono::seconds(3);
-    auto creds = std::make_unique<managed_identity_credentials>(logctx);
+    auto creds = std::make_unique<managed_identity_credentials>(_imds_endpoint, logctx);
     try {
         auto fut = creds->get_access_token(resource_uri);
         // Leave the future behind on timeout. The socket will eventually time out as well.
