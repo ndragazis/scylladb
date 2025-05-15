@@ -1510,12 +1510,13 @@ SEASTAR_TEST_CASE(test_azure_network_error) {
 /*
  * Utility function to run an Azure test with its own mock server instance.
  */
-static future<> azure_mock_test_helper(const std::function<future<>(unsigned int port)>& f) {
+static future<> azure_mock_test_helper(const std::function<future<>(std::string host, unsigned int port)>& f) {
     namespace bp = boost::process;
     tmpdir tmp;
     bp::child python;
     bp::group gp;
     bp::ipstream is;
+    std::string host;
     unsigned port;
 
     std::future<void> pykmip_status;
@@ -1541,14 +1542,18 @@ static future<> azure_mock_test_helper(const std::function<future<>(unsigned int
     python = bp::child(pyexec, gp,
         "test/pylib/start_azure_vault_mock.py",
         "--log-level", "INFO",
+        "--host", get_var_or_default("MOCK_AZURE_VAULT_SERVER_HOST", "127.0.0.1"),
+        "--port", "0",
         (bp::std_out & bp::std_err) > is, bp::std_in.close()
     );
 
+    std::promise<std::string> host_promise;
+    auto host_fut = host_promise.get_future();
     std::promise<int> port_promise;
-    auto fut = port_promise.get_future();
+    auto port_fut = port_promise.get_future();
 
     pykmip_status = std::async([&] {
-        static std::regex port_ex(R"foo(Starting Azure Vault mock server on \('[\d\.]+', (\d+)\))foo");
+        static std::regex port_ex(R"foo(Starting Azure Vault mock server on \('([\d\.]+)', (\d+)\))foo");
 
         std::string line;
         bool b = false;
@@ -1558,7 +1563,8 @@ static future<> azure_mock_test_helper(const std::function<future<>(unsigned int
                 std::cout << line << std::endl;
                 std::smatch m;
                 if (!b && std::regex_search(line, m, port_ex)) {
-                    port_promise.set_value(std::stoi(m[1].str()));
+                    host_promise.set_value(m[1].str());
+                    port_promise.set_value(std::stoi(m[2].str()));
                     b = true;
                 }
             }
@@ -1569,10 +1575,12 @@ static future<> azure_mock_test_helper(const std::function<future<>(unsigned int
         }
     });
     // arbitrary timeout of 20s for the server to make some output. Very generous.
-    if (fut.wait_for(20s) == std::future_status::timeout) {
+    if (port_fut.wait_for(20s) == std::future_status::timeout || host_fut.wait_for(20s) == std::future_status::timeout) {
         throw std::runtime_error("Could not start pykmip");
     }
-    port = fut.get();
+
+    host = host_fut.get();
+    port = port_fut.get();
     if (port <= 0) {
         throw std::runtime_error("Invalid port");
     }
@@ -1580,7 +1588,7 @@ static future<> azure_mock_test_helper(const std::function<future<>(unsigned int
     for (;;) {
         try {
             // TODO: seastar does not have a connect with timeout. That would be helpful here. But alas...
-            co_await seastar::connect(socket_address(net::inet_address("127.0.0.1"), uint16_t(port)));
+            co_await seastar::connect(socket_address(net::inet_address(host), uint16_t(port)));
             BOOST_TEST_MESSAGE("PyKMIP server up and available"); // debug print. Why not.
             break;
         } catch (...) {
@@ -1588,12 +1596,12 @@ static future<> azure_mock_test_helper(const std::function<future<>(unsigned int
         co_await sleep(100ms);
     }
 
-    co_await f(port);
+    co_await f(host, port);
 }
 
 SEASTAR_TEST_CASE(test_imds_retryable) {
-    co_await azure_mock_test_helper([](unsigned int port) -> future<> {
-        azure::managed_identity_credentials creds { fmt::format("127.0.0.1:{}", port) };
+    co_await azure_mock_test_helper([](std::string host, unsigned int port) -> future<> {
+        azure::managed_identity_credentials creds { fmt::format("{}:{}", host, port) };
         co_await creds.get_access_token("https://vault.azure.net/.default");
     });
 }
