@@ -42,6 +42,7 @@
 #include "cql3/untyped_result_set.hh"
 #include "utils/rjson.hh"
 #include "utils/azure/identity/exceptions.hh"
+#include "utils/azure/identity/managed_identity_credentials.hh"
 #include "replica/database.hh"
 #include "service/client_state.hh"
 
@@ -1505,3 +1506,107 @@ SEASTAR_TEST_CASE(test_azure_network_error) {
         });
     }, false);
 }
+
+/*
+ * Utility function to run an Azure test with its own mock server instance.
+ */
+static future<> azure_mock_test_helper(const std::function<future<>(unsigned int port)>& f) {
+    namespace bp = boost::process;
+    tmpdir tmp;
+    bp::child python;
+    bp::group gp;
+    bp::ipstream is;
+    unsigned port;
+
+    std::future<void> pykmip_status;
+
+    auto cleanup = defer([&] {
+        if (python.running()) {
+            BOOST_TEST_MESSAGE("Stopping PyKMIP server"); // debug print. Why not.
+            gp.terminate();
+            pykmip_status.get();
+        }
+    });
+
+    // note: default kmip port = 5696;
+
+    // Note: we set `enable_tls_client_auth=False` - client cert is still validated,
+    // but we have note generated certs with "extended usage client OID", which
+    // pykmip will check for if this is true.
+
+    auto pyexec = bp::search_path("python");
+
+    BOOST_TEST_MESSAGE("Starting PyKMIP server"); // debug print. Why not.
+
+    python = bp::child(pyexec, gp,
+        "test/pylib/start_azure_vault_mock.py",
+        "--log-level", "INFO",
+        (bp::std_out & bp::std_err) > is, bp::std_in.close()
+    );
+
+    std::promise<int> port_promise;
+    auto fut = port_promise.get_future();
+
+    pykmip_status = std::async([&] {
+        static std::regex port_ex(R"foo(Starting Azure Vault mock server on \('[\d\.]+', (\d+)\))foo");
+
+        std::string line;
+        bool b = false;
+
+        do {
+            while (std::getline(is, line)) {
+                std::cout << line << std::endl;
+                std::smatch m;
+                if (!b && std::regex_search(line, m, port_ex)) {
+                    port_promise.set_value(std::stoi(m[1].str()));
+                    b = true;
+                }
+            }
+        } while (python.running());
+
+        if (!b) {
+            port_promise.set_value(-1);
+        }
+    });
+    // arbitrary timeout of 20s for the server to make some output. Very generous.
+    if (fut.wait_for(20s) == std::future_status::timeout) {
+        throw std::runtime_error("Could not start pykmip");
+    }
+    port = fut.get();
+    if (port <= 0) {
+        throw std::runtime_error("Invalid port");
+    }
+    // wait for port.
+    for (;;) {
+        try {
+            // TODO: seastar does not have a connect with timeout. That would be helpful here. But alas...
+            co_await seastar::connect(socket_address(net::inet_address("127.0.0.1"), uint16_t(port)));
+            BOOST_TEST_MESSAGE("PyKMIP server up and available"); // debug print. Why not.
+            break;
+        } catch (...) {
+        }
+        co_await sleep(100ms);
+    }
+
+    co_await f(port);
+}
+
+SEASTAR_TEST_CASE(test_imds_retryable) {
+    co_await azure_mock_test_helper([](unsigned int port) -> future<> {
+        azure::managed_identity_credentials creds { fmt::format("127.0.0.1:{}", port) };
+        co_await creds.get_access_token("https://vault.azure.net/.default");
+    });
+}
+
+//SEASTAR_TEST_CASE(test_azure_host) {
+//    co_await azure_mock_test_helper([](unsigned int port) -> future<> {
+//        azure_host::host_options options {
+//            .imds_endpoint = fmt::format("http://127.0.0.1:{}", port),
+//            .master_key = fmt::format("http://127.0.0.1:{}/test-key", port),
+//        };
+//        azure_host host {"azure_test", options};
+//        key_info kinfo { .alg = "AES/CBC/PKCS5Padding", .len = 128};
+//
+//        co_await host.init();
+//    });
+//}
