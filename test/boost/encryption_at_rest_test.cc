@@ -1378,7 +1378,7 @@ SEASTAR_TEST_CASE(test_azure_provider_with_incomplete_creds) {
 
 future<> _test_azure_provider_with_invalid_key(bool real_server) {
     co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
-        auto vault = azure.key_name.substr(0, azure.key_name.rfind('/'));
+        auto vault = azure.key_name.substr(0, azure.key_name.find_last_of('/'));
         auto master_key = fmt::format("{}/nonexistentkey", vault);
         auto yaml = fmt::format(R"foo(
             azure_hosts:
@@ -1482,4 +1482,26 @@ SEASTAR_TEST_CASE(test_azure_provider_with_both_secret_and_cert, *check_run_test
             , tmp, yaml
             );
     });
+}
+
+SEASTAR_TEST_CASE(test_azure_network_error) {
+    co_await azure_test_helper([&](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
+        auto host_endpoint = fmt::format("{}:{}", get_mock_azure_addr(), get_mock_azure_port());
+        auto key = azure.key_name.substr(azure.key_name.find_last_of('/') + 1);
+        co_await network_error_test_helper(tmp, host_endpoint, [&](const auto& proxy) {
+            auto yaml = fmt::format(R"foo(
+                azure_hosts:
+                    azure_test:
+                        master_key: http://{0}/{1}
+                        azure_tenant_id: {2}
+                        azure_client_id: {3}
+                        azure_client_secret: {4}
+                        azure_authority_host: {5}
+                        key_cache_expiry: 1ms
+                        )foo"
+                , proxy.address(), key, azure.tenant_id, azure.user_1_client_id, azure.user_1_client_secret, azure.authority_host
+            );
+            return std::make_tuple(scopts_map({ { "key_provider", "AzureKeyProviderFactory" }, { "azure_host", "azure_test" } }), yaml);
+        });
+    }, false);
 }
