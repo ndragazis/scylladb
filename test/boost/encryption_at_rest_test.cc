@@ -1237,7 +1237,7 @@ SEASTAR_TEST_CASE(test_azure_provider_with_imds) {
     }, false);
 }
 
-future<> _test_azure_provider_with_secret(bool real_server) {
+static future<> _test_azure_provider_with_secret(bool real_server) {
     co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
         auto yaml = fmt::format(R"foo(
             azure_hosts:
@@ -1263,7 +1263,7 @@ SEASTAR_TEST_CASE(test_azure_provider_with_secret_real, *check_run_test_decorato
     co_await _test_azure_provider_with_secret(true);
 }
 
-future<> _test_azure_provider_with_certificate(bool real_server) {
+static future<> _test_azure_provider_with_certificate(bool real_server) {
     co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
         auto yaml = fmt::format(R"foo(
             azure_hosts:
@@ -1376,7 +1376,7 @@ SEASTAR_TEST_CASE(test_azure_provider_with_incomplete_creds) {
     }, false);
 }
 
-future<> _test_azure_provider_with_invalid_key(bool real_server) {
+static future<> _test_azure_provider_with_invalid_key(bool real_server) {
     co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
         auto vault = azure.key_name.substr(0, azure.key_name.find_last_of('/'));
         auto master_key = fmt::format("{}/nonexistentkey", vault);
@@ -1421,7 +1421,7 @@ SEASTAR_TEST_CASE(test_azure_provider_with_invalid_key_real, *check_run_test_dec
  * Verify that trying to access key materials with a user w/o permissions to wrap/unwrap using vault
  * fails.
 */
-future<> _test_azure_provider_with_invalid_user(bool real_server) {
+static future<> _test_azure_provider_with_invalid_user(bool real_server) {
     co_await azure_test_helper([](const tmpdir& tmp, const azure_test_env& azure) -> future<> {
         auto yaml = fmt::format(R"foo(
             azure_hosts:
