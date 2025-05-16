@@ -473,6 +473,7 @@ class MockAzureVaultServer:
         handler = partial(RequestHandler, self.vault, self.imds, self.entra, self.logger)
         self.server = ThreadingHTTPServer((host, port), handler)
         self.server_thread = None
+        self.server.request_queue_size = 10
         self.is_running = False
         self.envs = {'MOCK_AZURE_VAULT_SERVER_PORT': f'{port}', 'MOCK_AZURE_VAULT_SERVER_HOST': f'{host}'}
 
