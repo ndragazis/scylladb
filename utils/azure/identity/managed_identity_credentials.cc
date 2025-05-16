@@ -82,7 +82,7 @@ access_token managed_identity_credentials::make_token(const rjson::value& json, 
  * It follows the guidelines in the official Azure docs:
  * https://docs.azure.cn/en-us/entra/identity/managed-identities-azure-resources/how-to-use-vm-token#retry-guidance
  *
- * @note The number of retries was set to 3 instead of the recommended 5.
+ * @note The number of retries was set to 3 instead of the recommended 5 (waiting for 2 + 6 seconds is already too much).
  *
  * @param func A callable that returns a future<>, representing the asynchronous operation to retry.
  * @return A future<> that resolves to the result of the operation if successful, or propagates the error if all retries fail.
@@ -108,9 +108,9 @@ future<> managed_identity_credentials::with_retries(std::function<future<>()> fu
                 throw;
             }
 
-            backoff = (retries == 0 ? 0 : (1 << (retries - 1))) * DELTA_BACKOFF;
-            log_info("Token request failed with status {}. Reason: {}. Retrying in {} sec...",
-                    static_cast<int>(status), e.what(), backoff.count() / 1000);
+            backoff = DELTA_BACKOFF * ((1 << retries) - 1);
+            log_info("Token request failed with status {}. Reason: {}. Retrying in {} ms...",
+                    static_cast<int>(status), e.what(), backoff.count());
 
             retries++;
         }
