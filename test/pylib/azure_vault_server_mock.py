@@ -54,6 +54,13 @@ background-color:#555555;}
 
 INVALID_CLIENT_ID = "mock-client-id-invalid"
 
+
+class Error:
+    def __init__(self, error_type: str, count: int):
+        self.error_type = error_type
+        self.count = count
+
+
 class AzureVault:
     """
     Azure Key Vault service.
@@ -205,6 +212,9 @@ class AzureVault:
                 }
             })
 
+    def set_error_config(self, error_type, count):
+        self.error_config = Error(error_type, count)
+
 
 class AzureIMDS:
     """
@@ -215,6 +225,29 @@ class AzureIMDS:
     The generated tokens are cached and they are valid for 24 hours.
     """
     TOKEN_DURATION = 86400  # 24 hours
+
+    ERROR_TEMPLATES = {
+        'NotFound': (404, {
+            'error': 'not_found',
+            'error_description': 'IMDS endpoint is updating.',
+        }),
+        'InternalError': (500, {
+            'error': 'unknown',
+            'error_description': 'Failed to retrieve token from the Active directory. For details see logs in <file path>.',
+        }),
+        'Throttled': (429, {
+            'error': 'throttled',
+            'error_description': 'API Rate Limits have been exceeded.',
+        }),
+        'NoIdentity': (401, {
+            'error': 'invalid_request',
+            'error_description': 'Identity not found.', # E.g., no Managed Identity assigned to the VM
+        }),
+        'MultipleIdentities': (401, {
+            'error': 'invalid_request',
+            'error_description': 'Multiple user assigned identities exist, please specify the clientId / resourceId of the identity in the token request',
+        }),
+    }
 
     def __init__(self):
         self.token = None
@@ -248,16 +281,29 @@ class AzureIMDS:
     def expired(self):
         return time.time() >= self.expires
 
+    def _error_response(self, error_type):
+        if error_type not in self.ERROR_TEMPLATES:
+            raise ValueError(f"Unknown error type: {error_type}")
+        return self.ERROR_TEMPLATES[error_type]
+
     def get_access_token(self, resource: str):
+        if hasattr(self, 'error_config'):
+            error = self.error_config
+            if error.count > 0:
+                error.count -= 1
+                return self._error_response(error.error_type)
         if not self.token or self.token_resource != resource or self.expired():
             self.token, self.expires = self.generate_fake_jwt(resource)
             self.token_resource = resource
-        return {
+        return (200, {
             "access_token": self.token,
             "expires_in": str(int(self.expires - time.time())),
             "resource": resource,
             "token_type": "Bearer"
-        }
+        })
+
+    def set_error_config(self, error_type, count):
+        self.error_config = Error(error_type, count)
 
 
 class AzureEntraSTS:
@@ -342,6 +388,9 @@ class AzureEntraSTS:
             "access_token": token
         })
 
+    def set_error_config(self, error_type, count):
+        self.error_config = Error(error_type, count)
+
 
 class RequestHandler(BaseHTTPRequestHandler):
     """
@@ -355,6 +404,7 @@ class RequestHandler(BaseHTTPRequestHandler):
     keyop_re = re.compile(r'^/keys/([^/]+)/([^/]*)/([^/?]+)(\?.*)?$')
     entra_token_re = re.compile(r'^/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/oauth2/v2\.0/token$')
     imds_token_path = '/metadata/identity/oauth2/token'
+    error_path = "/config/error?"
 
     def __init__(self, vault, imds, entra, logger, *args, **kwargs):
         self.vault = vault
@@ -406,6 +456,32 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(response)
 
     def do_POST(self):
+        # Error endpoint
+        if self.path.startswith(self.error_path):
+            get = lambda params, key : params[key][0] if key in params and params[key] else None
+            parsed_url = urllib.parse.urlparse(self.path)
+            params = urllib.parse.parse_qs(parsed_url.query)
+
+            service = get(params, 'service')
+            error_type = get(params, 'error_type')
+            repeat = int(get(params, 'repeat') or '1')
+
+            if None in (service, error_type):
+                resp = {"error": {"code": "BadParameter", "message": "Query parameters 'service' and 'error_type' are required."}}
+                self._send_response(400, 'application/json', json.dumps(resp).encode('utf-8'))
+                return
+
+            svc = getattr(self, service, None)
+            if svc is None:
+                resp = {"error": {"code": "BadParameter", "message": "Invalid value for 'service'. Must be one of: 'vault', 'imds', 'entra'."}}
+                self._send_response(400, 'application/json', json.dumps(resp).encode('utf-8'))
+                return
+
+            svc.set_error_config(error_type, repeat)
+            self.send_response(200)
+            self.end_headers()
+            return
+
         # Entra token request endpoint
         match = self.entra_token_re.match(self.path)
         if match:
@@ -458,8 +534,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                     resp = {'error': 'invalid_request', 'error_description': f'Missing required parameter "{param}". Fix the request and retry.'}
                     self._send_response(400, 'application/json', json.dumps(resp).encode('utf-8'))
                     return
-            resp = self.imds.get_access_token(query_params['resource'][0])
-            self._send_response(200, 'application/json', json.dumps(resp).encode('utf-8'))
+            status, resp = self.imds.get_access_token(query_params['resource'][0])
+            self._send_response(status, 'application/json', json.dumps(resp).encode('utf-8'))
         else:
             self._send_response(404, 'text/plain', '')
 
