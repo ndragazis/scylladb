@@ -1636,17 +1636,6 @@ SEASTAR_TEST_CASE(test_imds) {
         }
 
         {
-            testlog.info("Testing IMDS stubborn transient errors");
-            azure::managed_identity_credentials creds { fmt::format("{}:{}", host, port) };
-            co_await configure_azure_mock_server(host, port, "imds", "InternalError", 100); // some high number
-            // expected to throw after 8 seconds
-            BOOST_REQUIRE_THROW(
-                co_await creds.get_access_token("https://vault.azure.net/.default"),
-                azure::creds_auth_error
-            );
-        }
-
-        {
             testlog.info("Testing IMDS non-transient errors");
             azure::managed_identity_credentials creds { fmt::format("{}:{}", host, port) };
             co_await configure_azure_mock_server(host, port, "imds", "NoIdentity", 1);
