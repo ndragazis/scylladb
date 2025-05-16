@@ -17,6 +17,8 @@
 #include <seastar/core/thread.hh>
 #include <seastar/util/defer.hh>
 #include <seastar/net/dns.hh>
+#include <seastar/http/client.hh>
+#include <seastar/http/request.hh>
 
 #include <seastar/testing/test_case.hh>
 
@@ -1605,10 +1607,43 @@ static future<> with_dedicated_azure_mock_server(const std::function<future<>(st
     co_await f(host, port);
 }
 
-SEASTAR_TEST_CASE(test_imds_retryable) {
+static future<> configure_azure_mock_server(const std::string& host, const unsigned int port, const std::string& service, const std::string& error_type, int repeat) {
+    auto cln = http::experimental::client(socket_address(net::inet_address(host), uint16_t(port)));
+    auto close_client = deferred_close(cln);
+    auto req = http::request::make("POST", host, "/config/error");
+    req._headers["Content-Length"] = "0";
+    req.query_parameters["service"] = service;
+    req.query_parameters["error_type"] = error_type;
+    req.query_parameters["repeat"] = std::to_string(repeat);
+    co_await cln.make_request(std::move(req), [](const http::reply&, input_stream<char>&&) -> future<> { return seastar::make_ready_future(); });
+}
+
+SEASTAR_TEST_CASE(test_imds) {
     co_await with_dedicated_azure_mock_server([](std::string host, unsigned int port) -> future<> {
-        azure::managed_identity_credentials creds { fmt::format("{}:{}", host, port) };
-        co_await creds.get_access_token("https://vault.azure.net/.default");
+        // Create new credential object for each test case because it caches the token.
+        {
+            testlog.info("Testing IMDS success path");
+            azure::managed_identity_credentials creds { fmt::format("{}:{}", host, port) };
+            co_await creds.get_access_token("https://vault.azure.net/.default");
+        }
+
+        {
+            testlog.info("Testing IMDS transient errors");
+            azure::managed_identity_credentials creds { fmt::format("{}:{}", host, port) };
+            co_await configure_azure_mock_server(host, port, "imds", "InternalError", 1);
+            // expected to not throw
+            co_await creds.get_access_token("https://vault.azure.net/.default");
+        }
+
+        {
+            testlog.info("Testing IMDS non-transient errors");
+            azure::managed_identity_credentials creds { fmt::format("{}:{}", host, port) };
+            co_await configure_azure_mock_server(host, port, "imds", "NoIdentity", 1);
+            BOOST_REQUIRE_THROW(
+                co_await creds.get_access_token("https://vault.azure.net/.default"),
+                azure::creds_auth_error
+            );
+        }
     });
 }
 
