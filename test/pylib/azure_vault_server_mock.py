@@ -316,16 +316,27 @@ class AzureEntraSTS:
     """
     TOKEN_DURATION = 3600  # 1 hour
 
+    # https://learn.microsoft.com/en-us/entra/identity-platform/reference-error-codes#handling-error-codes-in-your-application
     ERROR_TEMPLATES = {
-        'invalid_request': (400, {
+        'InvalidRequest': (400, {
                 'error': 'invalid_request',
                 'error_description': "AADSTS900144: The request body must contain the following parameter: '{missing_param}'",
                 'error_codes': [900144],
         }),
-        'invalid_client': (400, {
+        'InvalidClient': (400, {
                 'error': 'invalid_client',
                 'error_description': "AADSTS7000216: 'client_assertion', 'client_secret' or 'request' is required for the 'client_credentials' grant type.",
                 'error_codes': [7000216],
+        }),
+        'InvalidSecret': (401, {
+                'error': 'invalid_client',
+                'error_description': "AADSTS7000215: Invalid client secret is provided.",
+                'error_codes': [7000215],
+        }),
+        'TemporarilyUnavailable': (503, {
+                'error': 'temporarily_unavailable',
+                'error_description': 'The server is temporarily too busy to handle the request.',
+                'error_codes': [90006],
         }),
     }
 
@@ -366,16 +377,21 @@ class AzureEntraSTS:
         return status_code, response
 
     def get_access_token(self, tenant_id, form_data):
+        if hasattr(self, 'error_config'):
+            error = self.error_config
+            if error.count > 0:
+                error.count -= 1
+                return self._error_response(error.error_type)
         # Just check that all the required parameters are provided.
         # Ignore their values.
         required_params = ['client_id', 'scope', 'grant_type']
         missing_params = [param for param in required_params if param not in form_data]
         if missing_params:
-            return self._error_response('invalid_request', missing_params=missing_params[0])
+            return self._error_response('InvalidRequest', missing_params=missing_params[0])
         if 'client_secret' not in form_data and 'client_assertion' not in form_data:
-            return self._error_response('invalid_client')
+            return self._error_response('InvalidClient')
         if 'client_assertion' in form_data and 'client_assertion_type' not in form_data:
-            return self._error_response('invalid_request', missing_params='client_assertion_type')
+            return self._error_response('InvalidRequest', missing_params='client_assertion_type')
 
         client_id=form_data['client_id'][0]
         resource = form_data['scope'][0].removesuffix('.default')
