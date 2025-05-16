@@ -14,6 +14,7 @@ import time
 import base64
 import urllib
 import asyncio
+import logging
 from functools import partial
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -361,6 +362,14 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.entra = entra
         self.logger = logger
         super().__init__(*args, **kwargs)
+
+    def log_message(self, format, *args):
+        if not self.logger.isEnabledFor(logging.INFO):
+            return
+        self.logger.info("%s - - [%s] %s",
+                         self.client_address[0],
+                         self.log_date_time_string(),
+                         format % args)
 
     def handle_one_request(self):
         # Check for TLS handshake (first byte is typically 0x16 in TLS)
