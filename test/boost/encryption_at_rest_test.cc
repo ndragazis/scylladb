@@ -1542,7 +1542,7 @@ static future<> with_dedicated_azure_mock_server(const std::function<future<>(st
         "test/pylib/start_azure_vault_mock.py",
         "--log-level", "INFO",
         "--host", get_var_or_default("MOCK_AZURE_VAULT_SERVER_HOST", "127.0.0.1"),
-        "--port", "0",
+        "--port", "0", // random port
         (bp::std_out & bp::std_err) > is, bp::std_in.close()
     );
 
@@ -1580,15 +1580,25 @@ static future<> with_dedicated_azure_mock_server(const std::function<future<>(st
         throw std::runtime_error("Invalid port");
     }
     // wait for port.
-    for (;;) {
+    auto sleep_interval = 100ms;
+    auto timeout = 5s;
+    auto end_time = seastar::lowres_clock::now() + timeout;
+    bool connected = false;
+    while (seastar::lowres_clock::now() < end_time) {
+        BOOST_TEST_MESSAGE(fmt::format("Connecting to {}:{}", host, port));
         try {
             // TODO: seastar does not have a connect with timeout. That would be helpful here. But alas...
             co_await seastar::connect(socket_address(net::inet_address(host), uint16_t(port)));
             BOOST_TEST_MESSAGE("Dedicated Azure Vault mock server up and available");
+            connected = true;
             break;
         } catch (...) {
         }
-        co_await sleep(100ms);
+        co_await sleep(sleep_interval);
+    }
+
+    if (!connected) {
+        throw std::runtime_error(fmt::format("Timed out connecting to Azure Vault mock server at {}:{}", host, port));
     }
 
     co_await f(host, port);
