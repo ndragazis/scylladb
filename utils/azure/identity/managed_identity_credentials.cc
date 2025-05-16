@@ -76,13 +76,17 @@ access_token managed_identity_credentials::make_token(const rjson::value& json, 
 }
 
 /**
- * @brief Retries with exponential backoff.
+ * @brief Retries for transient errors.
  *
- * This helper implements a retry logic with exponential backoff strategy for transient errors.
- * It follows the guidelines in the official Azure docs:
+ * Retries are performed for 404, 429, and 5xx errors, using an exponential backoff strategy.
+ * The first retry is immediate, while the rest follow an exponential delay, starting at 2 seconds.
+ *
+ * Based on the official Azure docs:
  * https://docs.azure.cn/en-us/entra/identity/managed-identities-azure-resources/how-to-use-vm-token#retry-guidance
  *
- * @note The number of retries was set to 3 instead of the recommended 5 (waiting for 2 + 6 seconds is already too much).
+ * @note The number of retries was set to 3 instead of the recommended 5.
+ * Waiting for 2 + 6 seconds seems too much already and 3 is the default value in the Azure C++ SDK:
+ * https://github.com/Azure/azure-sdk-for-cpp/blob/126452efd30860263398a152f11f337007f529f4/sdk/core/azure-core/inc/azure/core/http/policies/policy.hpp#L113
  *
  * @param func A callable that returns a future<>, representing the asynchronous operation to retry.
  * @return A future<> that resolves to the result of the operation if successful, or propagates the error if all retries fail.
