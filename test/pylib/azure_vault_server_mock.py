@@ -474,7 +474,8 @@ class MockAzureVaultServer:
         self.server = ThreadingHTTPServer((host, port), handler)
         self.server_thread = None
         self.server.request_queue_size = 10
-        self.is_running = False
+        self.is_stopped = asyncio.Event()
+        self.is_stopped.set()
         self.envs = {'MOCK_AZURE_VAULT_SERVER_PORT': f'{port}', 'MOCK_AZURE_VAULT_SERVER_HOST': f'{host}'}
 
     def _set_environ(self):
@@ -489,27 +490,26 @@ class MockAzureVaultServer:
         return self.envs
 
     async def start(self):
-        if not self.is_running:
+        if self.is_stopped.is_set():
             self.logger.info(f'Starting Azure Vault mock server on {self.server.server_address}')
             self._set_environ()
             loop = asyncio.get_running_loop()
             self.server_thread = loop.run_in_executor(None, self.server.serve_forever)
-            self.is_running = True
+            self.is_stopped.clear()
 
     async def stop(self):
-        if self.is_running:
+        if not self.is_stopped.is_set():
             self.logger.info(f'Stopping Azure Vault mock server')
             self._unset_environ()
             self.server.shutdown()
             self.server.server_close()
             await self.server_thread
-            self.is_running = False
+            self.is_stopped.set()
 
     async def run(self):
         try:
             await self.start()
-            while self.is_running:
-                await asyncio.sleep(1)
+            await self.is_stopped.wait()
         except (Exception, asyncio.CancelledError) as e:
             self.logger.error(f'Server error: {e}')
             await self.stop()
