@@ -143,6 +143,51 @@ static future<::shared_ptr<tls::certificate_credentials>> make_creds(const sstri
     co_return creds;
 }
 
+/**
+ * @brief Retries for transient errors.
+ *
+ * Retries are performed for 408, 429, 500, 502, 503, and 504 errors, using an exponential backoff strategy.
+ * The first retry is immediate, while the rest follow an exponential delay, starting at 2 seconds.
+ *
+ * Based on the generic retry policy of the Azure C++ SDK:
+ * https://github.com/Azure/azure-sdk-for-cpp/blob/126452efd30860263398a152f11f337007f529f4/sdk/core/azure-core/inc/azure/core/http/policies/policy.hpp#L107
+ *
+ * @param func The asynchronous function to execute and retry on failure.
+ * @return The result of the function if successful, or throws if all retries fail or a non-retriable error occurs.
+ */
+future<sstring> service_principal_credentials::with_retries(std::function<future<sstring>()> func) {
+    constexpr int MAX_RETRIES = 3;
+    constexpr std::chrono::milliseconds DELTA_BACKOFF {2000};
+    std::chrono::milliseconds backoff;
+
+    int retries = 0;
+    while (true) {
+        try {
+            co_return co_await func();
+        } catch (const creds_auth_error& e) {
+            auto status = e.status();
+            bool should_retry =
+                    status == http::reply::status_type::request_timeout ||
+                    status == http::reply::status_type::too_many_requests ||
+                    status == http::reply::status_type::internal_server_error ||
+                    status == http::reply::status_type::bad_gateway ||
+                    status == http::reply::status_type::service_unavailable ||
+                    status == http::reply::status_type::gateway_timeout;
+
+            if (retries >= MAX_RETRIES || !should_retry) {
+                throw;
+            }
+
+            backoff = DELTA_BACKOFF * ((1 << retries) - 1);
+            log_info("Token request failed with status {}. Reason: {}. Retrying in {} ms...",
+                    static_cast<int>(status), e.what(), backoff.count());
+
+            retries++;
+        }
+        co_await seastar::sleep(backoff);
+    }
+}
+
 future<sstring> service_principal_credentials::post(const sstring& body) {
     const auto op = httpd::operation_type::POST;
     const auto path = seastar::format(AZURE_ENTRA_ID_TOKEN_PATH_TEMPLATE, _tenant_id);
@@ -213,7 +258,7 @@ future<> service_principal_credentials::refresh_with_secret(const resource_type&
             seastar::http::internal::url_encode(scope),
             seastar::http::internal::url_encode(_client_secret),
             grant_type);
-    auto resp = co_await post(body);
+    auto resp = co_await with_retries([&] { return post(body); });
     token = make_token(rjson::parse(resp), resource_uri);
 }
 
@@ -314,7 +359,7 @@ future<> service_principal_credentials::refresh_with_certificate(const resource_
             seastar::http::internal::url_encode(client_assertion_type),
             sign,
             grant_type);
-    auto resp = co_await post(body);
+    auto resp = co_await with_retries([&] { return post(body); });
     token = make_token(rjson::parse(resp), resource_uri);
 }
 

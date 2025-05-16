@@ -33,6 +33,7 @@ class service_principal_credentials : public credentials {
 
     const char* get_name() const override { return NAME; };
     future<sstring> post(const sstring& body);
+    future<sstring> with_retries(std::function<future<sstring>()>);
     future<> refresh(const resource_type& resource_uri) override;
     future<> refresh_with_secret(const resource_type& resource_uri);
     future<> refresh_with_certificate(const resource_type& resource_uri);
