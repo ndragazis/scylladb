@@ -25,6 +25,7 @@ class managed_identity_credentials : public credentials {
     unsigned _port;
 
     const char* get_name() const override { return NAME; };
+    future<> with_retries(std::function<future<>()>);
     future<> refresh(const resource_type& resource_uri) override;
     access_token make_token(const rjson::value&, const resource_type&);
 public:
