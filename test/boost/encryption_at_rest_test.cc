@@ -45,6 +45,7 @@
 #include "utils/rjson.hh"
 #include "utils/azure/identity/exceptions.hh"
 #include "utils/azure/identity/managed_identity_credentials.hh"
+#include "utils/azure/identity/service_principal_credentials.hh"
 #include "replica/database.hh"
 #include "service/client_state.hh"
 
@@ -1639,6 +1640,45 @@ SEASTAR_TEST_CASE(test_imds) {
             testlog.info("Testing IMDS non-transient errors");
             azure::managed_identity_credentials creds { fmt::format("{}:{}", host, port) };
             co_await configure_azure_mock_server(host, port, "imds", "NoIdentity", 1);
+            BOOST_REQUIRE_THROW(
+                co_await creds.get_access_token("https://vault.azure.net/.default"),
+                azure::creds_auth_error
+            );
+        }
+    });
+}
+
+SEASTAR_TEST_CASE(test_entra_sts) {
+    co_await with_dedicated_azure_mock_server([](std::string host, unsigned int port) -> future<> {
+        auto make_entra_creds = [&] {
+            return azure::service_principal_credentials {
+                "00000000-1111-2222-3333-444444444444",
+                "mock-client-id",
+                "mock-client-secret",
+                "",
+                fmt::format("http://{}:{}", host, port),
+             };
+        };
+
+        // Create new credential object for each test case because it caches the token.
+        {
+            testlog.info("Testing Entra STS success path");
+            auto creds = make_entra_creds();
+            co_await creds.get_access_token("https://vault.azure.net/.default");
+        }
+
+        {
+            testlog.info("Testing Entra STS transient errors");
+            auto creds = make_entra_creds();
+            co_await configure_azure_mock_server(host, port, "entra", "TemporarilyUnavailable", 1);
+            // expected to not throw
+            co_await creds.get_access_token("https://vault.azure.net/.default");
+        }
+
+        {
+            testlog.info("Testing Entra STS non-transient errors");
+            auto creds = make_entra_creds();
+            co_await configure_azure_mock_server(host, port, "entra", "InvalidSecret", 1);
             BOOST_REQUIRE_THROW(
                 co_await creds.get_access_token("https://vault.azure.net/.default"),
                 azure::creds_auth_error
