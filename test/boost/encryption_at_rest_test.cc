@@ -1526,8 +1526,8 @@ static future<> with_dedicated_azure_mock_server(const std::function<future<>(st
 
     std::future<void> server_status;
 
-    auto authority_promise = std::make_shared<std::promise<std::pair<std::string, int>>>();
-    auto fut = authority_promise->get_future();
+    std::promise<std::pair<std::string, int>> authority_promise;
+    auto fut = authority_promise.get_future();
 
     auto cleanup = defer([&] {
         if (python.running()) {
@@ -1549,27 +1549,27 @@ static future<> with_dedicated_azure_mock_server(const std::function<future<>(st
         (bp::std_out & bp::std_err) > is, bp::std_in.close()
     );
 
-    server_status = std::async([promise = authority_promise] (bp::ipstream& stream, bp::child& py) {
+    server_status = std::async([&] {
         static std::regex port_ex(R"foo(Starting Azure Vault mock server on \('([\d\.]+)', (\d+)\))foo");
 
         std::string line;
         bool b = false;
 
         do {
-            while (std::getline(stream, line)) {
+            while (std::getline(is, line)) {
                 std::cout << line << std::endl;
                 std::smatch m;
                 if (!b && std::regex_search(line, m, port_ex)) {
-                    promise->set_value({m[1].str(), std::stoi(m[2].str())});
+                    authority_promise.set_value({m[1].str(), std::stoi(m[2].str())});
                     b = true;
                 }
             }
-        } while (py.running());
+        } while (python.running());
 
         if (!b) {
-            promise->set_value({"", -1});
+            authority_promise.set_value({"", -1});
         }
-    }, std::ref(is), std::ref(python));
+    });
 
     // arbitrary timeout of 20s for the server to make some output. Very generous.
     if (fut.wait_for(20s) == std::future_status::timeout) {
