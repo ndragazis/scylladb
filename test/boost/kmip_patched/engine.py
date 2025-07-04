@@ -98,8 +98,9 @@ class KmipEngine(object):
             connect_args={'check_same_thread': False}
         )
         self._logger.debug(f"[KMIP-PATCHED] KmipEngine.__init__(): Creating database schema at {self.database_path}")
+        start = time.time()
         sqltypes.Base.metadata.create_all(self._data_store)
-        self._logger.debug("[KMIP-PATCHED] KmipEngine.__init__(): Created database schema.")
+        self._logger.debug(f"[KMIP-PATCHED] KmipEngine.__init__(): Created database schema in {time.time() - start:.3f} seconds.")
         self._logger.debug("[KMIP-PATCHED] KmipEngine.__init__(): Creating session factory.")
         self._data_store_session_factory = sqlalchemy.orm.sessionmaker(
             bind=self._data_store
