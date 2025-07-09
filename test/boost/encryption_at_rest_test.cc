@@ -345,6 +345,21 @@ static future<> kmip_test_helper(const std::function<future<>(const kmip_test_in
         }
     });
 
+    if (bp::search_path("strace").empty()) {
+        BOOST_TEST_MESSAGE("strace not found, attempting to install using dnf...");
+
+        auto result = bp::system("sudo dnf install -y strace");
+        if (result == 0) {
+            auto new_strace_path = bp::search_path("strace");
+            if (new_strace_path.empty()) {
+                throw std::runtime_error("dnf install command succeeded but strace still not found");
+            }
+            BOOST_TEST_MESSAGE("strace successfully installed at: " + new_strace_path.string());
+        } else {
+            throw std::runtime_error("Failed to install strace with dnf (exit code: " + std::to_string(result) + ")");
+        }
+    }
+
     // note: default kmip port = 5696;
 
     if (!host_set) {
