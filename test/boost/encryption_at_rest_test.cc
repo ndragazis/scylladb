@@ -10,6 +10,8 @@
 #include <stdint.h>
 #include <random>
 #include <regex>
+#include <unistd.h>
+#include <sys/types.h>
 
 #include <seastar/core/future-util.hh>
 #include <seastar/core/seastar.hh>
@@ -337,11 +339,25 @@ static future<> kmip_test_helper(const std::function<future<>(const kmip_test_in
         .prio = get_var_or_default("KMIP_PRIO", "SECURE128:+RSA:-VERS-TLS1.0:-ECDHE-ECDSA")
     };
 
+    // Check if KMIP_STRACE environment variable is set
+    bool strace_enabled = false;
+    std::string strace_log;
+    const char* strace_env = std::getenv("KMIP_STRACE");
+
+    if (strace_env && std::string(strace_env) == "1") {
+        strace_enabled = true;
+        strace_log = fmt::format("{}/kmip_strace.log", tmp.path().string());
+        BOOST_TEST_MESSAGE(fmt::format("KMIP strace enabled, PyKMIP server will be traced to: {}", strace_log));
+    }
+
     auto cleanup = defer([&] {
         if (python.running()) {
             BOOST_TEST_MESSAGE("Stopping PyKMIP server"); // debug print. Why not.
             gp.terminate();
             pykmip_status.get();
+        }
+        if (strace_enabled && !strace_log.empty()) {
+            BOOST_TEST_MESSAGE(fmt::format("KMIP strace log available at: {}", strace_log));
         }
     });
 
@@ -377,14 +393,43 @@ database_path={}/pykmip.db
 
         BOOST_TEST_MESSAGE("Starting PyKMIP server"); // debug print. Why not.
 
-        python = bp::child(pyexec, gp,
-            "test/boost/kmip_wrapper.py",
-            "-l", log,
-            "-f", cfgfile,
-            "-v", "DEBUG",
-            (bp::std_out & bp::std_err) > is, bp::std_in.close(),
-            bp::env["TMPDIR"]=tmp.path().string()
-        );
+        // Check if we should run PyKMIP under strace
+        if (strace_enabled) {
+            BOOST_TEST_MESSAGE(fmt::format("Running PyKMIP server under strace, log: {}", strace_log));
+
+            try {
+                python = bp::child(bp::search_path("strace"), gp,
+                    "-tt", "-T", "-f", "-v",
+                    "-e", "fsync,fdatasync,fcntl,pread64,pwrite64,close,unlink,openat,open",
+                    //"-o", strace_log,
+                    "--", pyexec.string(), "test/boost/kmip_wrapper.py",
+                    "-l", log,
+                    "-f", cfgfile,
+                    "-v", "DEBUG",
+                    (bp::std_out & bp::std_err) > is, bp::std_in.close(),
+                    bp::env["TMPDIR"]=tmp.path().string()
+                );
+            } catch (const std::exception& e) {
+                BOOST_TEST_MESSAGE(fmt::format("Failed to start PyKMIP under strace: {}, falling back to normal mode", e.what()));
+                python = bp::child(pyexec, gp,
+                    "test/boost/kmip_wrapper.py",
+                    "-l", log,
+                    "-f", cfgfile,
+                    "-v", "DEBUG",
+                    (bp::std_out & bp::std_err) > is, bp::std_in.close(),
+                    bp::env["TMPDIR"]=tmp.path().string()
+                );
+            }
+        } else {
+            python = bp::child(pyexec, gp,
+                "test/boost/kmip_wrapper.py",
+                "-l", log,
+                "-f", cfgfile,
+                "-v", "DEBUG",
+                (bp::std_out & bp::std_err) > is, bp::std_in.close(),
+                bp::env["TMPDIR"]=tmp.path().string()
+            );
+        }
 
         pykmip_status = std::async([&] {
             static std::regex port_ex("Listening on (\\d+)");
