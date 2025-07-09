@@ -347,7 +347,7 @@ static future<> kmip_test_helper(const std::function<future<>(const kmip_test_in
     });
 
     if (bp::search_path("strace").empty()) {
-        BOOST_TEST_MESSAGE("strace not found, attempting to install using dnf...");
+        testlog.info("strace not found, attempting to install using dnf...");
 
         const char* sem_name = "/scylladb_strace_install";
         sem_t* sem = sem_open(sem_name, O_CREAT, 0644, 1);
@@ -360,7 +360,7 @@ static future<> kmip_test_helper(const std::function<future<>(const kmip_test_in
             sem_unlink(sem_name);
         });
 
-        BOOST_TEST_MESSAGE("Acquiring semaphore for strace installation...");
+        testlog.info("Acquiring semaphore for strace installation...");
         if (sem_wait(sem) != 0) {
             throw std::runtime_error("Failed to acquire semaphore for strace installation");
         }
@@ -370,16 +370,16 @@ static future<> kmip_test_helper(const std::function<future<>(const kmip_test_in
         });
 
         if (!bp::search_path("strace").empty()) {
-            BOOST_TEST_MESSAGE("strace was installed by another process while waiting for semaphore");
+            testlog.info("strace was installed by another process while waiting for semaphore");
         } else {
-            BOOST_TEST_MESSAGE("Installing strace with dnf...");
+            testlog.info("Installing strace with dnf...");
             auto result = bp::system("sudo dnf install -y strace");
             if (result == 0) {
                 auto new_strace_path = bp::search_path("strace");
                 if (new_strace_path.empty()) {
                     throw std::runtime_error("dnf install command succeeded but strace still not found");
                 }
-                BOOST_TEST_MESSAGE("strace successfully installed at: " + new_strace_path.string());
+                testlog.info("strace successfully installed at: {}", new_strace_path.string());
             } else {
                 throw std::runtime_error("Failed to install strace with dnf (exit code: " + std::to_string(result) + ")");
             }
