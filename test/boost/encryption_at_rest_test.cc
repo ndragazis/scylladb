@@ -448,6 +448,8 @@ database_path={}/pykmip.db
     }
 
     co_await f(info, tmp);
+
+    throw std::runtime_error("Deliberate exception to preserve the tmpdir.");
 }
 
 SEASTAR_TEST_CASE(test_kmip_provider, *check_run_test_decorator("ENABLE_KMIP_TEST", true)) {
