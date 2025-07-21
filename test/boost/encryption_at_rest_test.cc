@@ -474,6 +474,8 @@ class fake_proxy {
             dst_addr = dst_addr.substr(0, i);
         }
 
+        bool proxy_exception_raised = false;
+
         auto addr = co_await seastar::net::dns::resolve_name(dst_addr);
         std::vector<future<>> work;
 
@@ -489,10 +491,11 @@ class fake_proxy {
                     auto& ldst = dst;
                     auto addr = client.remote_address;
 
-                    auto do_io = [this, &addr, &dst_addr, port](connected_socket& src, connected_socket& dst) noexcept -> future<> {
+                    auto do_io = [this, &addr, &dst_addr, port, &proxy_exception_raised](connected_socket& src, connected_socket& dst) noexcept -> future<> {
+                        auto sin = src.input();
+                        auto dout = dst.output();
+                        std::exception_ptr ex;
                         try {
-                            auto sin = src.input();
-                            auto dout = dst.output();
                             // note: have to have differing conditions for proxying
                             // and shutdown, and need to check inside look, because
                             // kmip connector caches connection -> not new socket.
@@ -506,10 +509,14 @@ class fake_proxy {
                                     testlog.trace("Wrote {} bytes: {}->{}:{}", n, addr, dst_addr, port);
                                 }
                             }
-                            co_await dout.close();
-                            co_await sin.close();
                         } catch (...) {
-                            testlog.warn("Exception running proxy {}:{}->{}: {}", dst_addr, port, _address, std::current_exception());
+                            ex = std::current_exception();
+                            testlog.error("Exception running proxy {}:{}->{}: {}", dst_addr, port, _address, std::current_exception());
+                        }
+                        co_await dout.close();
+                        co_await sin.close();
+                        if (ex) {
+                            proxy_exception_raised = true;
                         }
                     };
                     co_await when_all(do_io(s, ldst), do_io(ldst, s));
@@ -526,6 +533,9 @@ class fake_proxy {
                 co_await std::move(f);
             } catch (...) {
             }
+        }
+        if (proxy_exception_raised) {
+            BOOST_FAIL("Exception in do_io()");
         }
     }
 public:
