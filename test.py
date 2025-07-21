@@ -344,7 +344,10 @@ def run_pytest(options: argparse.Namespace, run_id: int) -> tuple[int, list[Simp
     args.extend(files_to_run)
 
     args = shlex.split(' '.join(args))
-    p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True)
+    env = os.environ.copy()
+    if 'debug' in options.modes:
+        env['ASAN_OPTIONS'] = 'disable_coredump=0'
+    p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, universal_newlines=True, env=env)
     try:
         # Read output from pytest and print it to the console
         if options.verbose:
