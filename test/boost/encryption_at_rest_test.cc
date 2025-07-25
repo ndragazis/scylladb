@@ -67,6 +67,7 @@ struct test_provider_args {
 };
 
 static void do_create_and_insert(cql_test_env& env, const test_provider_args& args, const std::string& pk, const std::string& v) {
+    //seastar::sleep(5s).get();
     for (auto i = 0u; i < args.n_tables; ++i) {
         if (args.before_create_table) {
             testlog.debug("Calling before create table");
@@ -483,6 +484,9 @@ class fake_proxy {
             try {
                 auto client = co_await _socket.accept();
                 auto dst = co_await seastar::connect(socket_address(addr, port));
+                //auto dst = co_await seastar::connect(socket_address(addr, port), socket_address(seastar::net::inet_address("0.0.0.0"), 5467), transport::TCP);
+
+                //co_await sleep(5s);
 
                 testlog.debug("Got proxy connection: {}->{}:{} ({})", client.remote_address, dst_addr, port, _do_proxy);
 
@@ -491,7 +495,7 @@ class fake_proxy {
                     auto& ldst = dst;
                     auto addr = client.remote_address;
 
-                    auto do_io = [this, &addr, &dst_addr, port, &proxy_exception_raised](connected_socket& src, connected_socket& dst) noexcept -> future<> {
+                    auto do_io = [this, &addr, &dst_addr, port, &proxy_exception_raised](std::string direction, connected_socket& src, connected_socket& dst) noexcept -> future<> {
                         auto sin = src.input();
                         auto dout = dst.output();
                         std::exception_ptr ex;
@@ -502,16 +506,16 @@ class fake_proxy {
                             while (_go_on && _do_proxy && !sin.eof()) {
                                 auto buf = co_await sin.read();
                                 auto n = buf.size();
-                                testlog.trace("Read {} bytes: {}->{}:{}", n, addr, dst_addr, port);
+                                testlog.trace("Read {} bytes: {}->{}:{} ({})", n, addr, dst_addr, port, direction);
                                 if (_do_proxy) {
                                     co_await dout.write(std::move(buf));
                                     co_await dout.flush();
-                                    testlog.trace("Wrote {} bytes: {}->{}:{}", n, addr, dst_addr, port);
+                                    testlog.trace("Wrote {} bytes: {}->{}:{} ({})", n, addr, dst_addr, port, direction);
                                 }
                             }
                         } catch (...) {
                             ex = std::current_exception();
-                            testlog.error("Exception running proxy {}:{}->{}: {}", dst_addr, port, _address, std::current_exception());
+                            testlog.error("Exception running proxy {}:{}->{} ({}): {}", dst_addr, port, _address, direction, std::current_exception());
                         }
                         co_await dout.close();
                         co_await sin.close();
@@ -519,7 +523,7 @@ class fake_proxy {
                             proxy_exception_raised = true;
                         }
                     };
-                    co_await when_all(do_io(s, ldst), do_io(ldst, s));
+                    co_await when_all(do_io("client->server", s, ldst), do_io("server->client", ldst, s));
                 }();
 
                 work.emplace_back(std::move(f));
