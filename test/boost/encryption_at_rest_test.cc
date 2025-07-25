@@ -504,11 +504,14 @@ class fake_proxy {
                             // and shutdown, and need to check inside look, because
                             // kmip connector caches connection -> not new socket.
                             while (_go_on && _do_proxy && !sin.eof()) {
+                                testlog.trace("Reading data: {}->{}:{} ({})", addr, dst_addr, port, direction);
                                 auto buf = co_await sin.read();
                                 auto n = buf.size();
                                 testlog.trace("Read {} bytes: {}->{}:{} ({})", n, addr, dst_addr, port, direction);
                                 if (_do_proxy) {
+                                    testlog.trace("Writing data: {}->{}:{} ({})", addr, dst_addr, port, direction);
                                     co_await dout.write(std::move(buf));
+                                    testlog.trace("Flushing data: {}->{}:{} ({})", addr, dst_addr, port, direction);
                                     co_await dout.flush();
                                     testlog.trace("Wrote {} bytes: {}->{}:{} ({})", n, addr, dst_addr, port, direction);
                                 }
@@ -517,8 +520,12 @@ class fake_proxy {
                             ex = std::current_exception();
                             testlog.error("Exception running proxy {}:{}->{} ({}): {}", dst_addr, port, _address, direction, std::current_exception());
                         }
+                        testlog.trace("Closing output stream: {}->{}:{} ({})", addr, dst_addr, port, direction);
                         co_await dout.close();
+                        testlog.trace("Closed output stream: {}->{}:{} ({})", addr, dst_addr, port, direction);
+                        testlog.trace("Closing input stream: {}->{}:{} ({})", addr, dst_addr, port, direction);
                         co_await sin.close();
+                        testlog.trace("Closed input stream: {}->{}:{} ({})", addr, dst_addr, port, direction);
                         if (ex) {
                             proxy_exception_raised = true;
                         }
