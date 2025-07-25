@@ -153,14 +153,19 @@ class CppFile(pytest.File):
             if mode == "coverage":
                 self.env.update(coverage_script.env(executable))
             for test_name in tests:
+                env = self.env.copy()
+                arguments = self._arguments.copy()
                 if '/' in test_name:
                     test_name = test_name.replace('/', '_')
+                if test_name == 'test_kms_network_error':
+                    env['GNUTLS_DEBUG_LEVEL'] = '1000'
+                    arguments.append('--logger-log-level testlog=trace')
                 if self.parameters:
                     for index, parameter in enumerate(self.parameters):
                         yield CppTestFunction.from_parent(self, name=test_name, executable=executable,
                                                           facade=self.facade, mode=mode, test_unique_name=f'{test_name}.{index + 1}',
-                                                          file_name=self.path, run_id=self.run_id, env=self.env,
-                                                          arguments=[*self._arguments, parameter])
+                                                          file_name=self.path, run_id=self.run_id, env=env,
+                                                          arguments=[*arguments, parameter])
                 else:
                     yield CppTestFunction.from_parent(self, name=test_name, executable=executable, facade=self.facade, mode=mode,
-                                                      file_name=self.path, test_unique_name=test_name, run_id=self.run_id, env=self.env, arguments=self._arguments)
+                                                      file_name=self.path, test_unique_name=test_name, run_id=self.run_id, env=env, arguments=arguments)

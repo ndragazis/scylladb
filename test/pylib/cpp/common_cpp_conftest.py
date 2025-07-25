@@ -96,6 +96,8 @@ def collect_items(file_path: PosixPath, parent: Collector, facade: CppTestFacade
         ASAN_OPTIONS=":".join(filter(None, ASAN_OPTIONS)),
         SCYLLA_TEST_ENV='yes',
     )
+    # if file_path.name == 'encryption_at_rest_test.cc':
+    #     test_env['GNUTLS_DEBUG_LEVEL'] = '1000'
     pytest_config = parent.config
     run_id = pytest_config.getoption('run_id')
     modes = get_modes_to_run(parent.session.config)
@@ -105,6 +107,8 @@ def collect_items(file_path: PosixPath, parent: Collector, facade: CppTestFacade
     args = copy(DEFAULT_ARGS)
     custom_args_config = suite_config.get('custom_args', {})
     extra_scylla_cmdline_options = suite_config.get('extra_scylla_cmdline_options', [])
+    # if file_path.name == 'encryption_at_rest_test.cc':
+    #     extra_scylla_cmdline_options.append('--logger-log-level testlog=trace')
     x_log2_compaction_groups = pytest_config.getoption('x_log2_compaction_groups', None)
     all_can_run_compaction_groups_except = suite_config.get('all_can_run_compaction_groups_except', None)
     test_name = file_path.stem
