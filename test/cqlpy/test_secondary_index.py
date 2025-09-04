@@ -2147,3 +2147,53 @@ def test_limit_partition_slice_across_pages(cql, test_keyspace):
                 result = list(cql.execute(stmt))
                 expected_all = [(1,1), (1,2), (1,3), (2,1), (2,2), (2,3)]
                 assert sorted(result) == sorted(expected_all[:limit])
+
+
+# Test that a LIMIT works correctly when the query is paged and the base table
+# reads are short.
+#
+# The purpose of this test is to trigger the second scenario listed in the
+# docstring of test_limit_partition_slice_across_pages.
+@pytest.mark.xfail(reason="issue #22158")
+def test_limit_partition_slice_short_read(cql, test_keyspace):
+    page_memory_limit = 1024 * 1024  # 1MiB (taken from `result_memory_accounter::maximum_result_size`)
+    row_size = page_memory_limit // 2  # will cause short read after 2 rows
+    with new_test_table(cql, test_keyspace, 'pk int, ck1 int, ck2 int, data text, primary key (pk, ck1, ck2)') as table:
+        cql.execute(f'CREATE INDEX ON {table}(ck1)')
+        stmt = cql.prepare(f'INSERT INTO {table} (pk, ck1, ck2, data) VALUES (?, ?, ?, ?)')
+        cql.execute(stmt, [1, 1, 1, 'A' * row_size])
+        cql.execute(stmt, [1, 1, 2, 'B' * row_size])
+        cql.execute(stmt, [1, 1, 3, 'C' * row_size])
+        cql.execute(stmt, [2, 1, 1, 'E' * row_size])
+        cql.execute(stmt, [2, 1, 2, 'F' * row_size])
+        cql.execute(stmt, [2, 1, 3, 'G' * row_size])
+        stmt = SimpleStatement(f'SELECT pk, ck2, data FROM {table} WHERE ck1 = 1 LIMIT 3')
+        rs = list(cql.execute(stmt))
+        rows = [(col[0], col[1]) for col in rs]
+        assert rows == [(1,1), (1,2), (1,3)]
+
+
+# Same as test_limit_partition_slice_short_read above, but using a single partition.
+# In this special case, the LIMIT is undershooted instead of overshooted.
+# This happens because, when running the index view query for the second page,
+# the code drops the partition key if it matches the last one from the previous
+# page (checked via the paging state), effectively returning an empty page.
+# For more details, check the continuation attached to `read_posting_list()` in
+# `find_index_partition_ranges()`.
+@pytest.mark.xfail(reason="issue #22158")
+def test_limit_partition_slice_short_read_single_partition(cql, test_keyspace):
+    page_memory_limit = 1024 * 1024  # 1MiB (taken from `result_memory_accounter::maximum_result_size`)
+    row_size = page_memory_limit // 2  # will cause short read after 2 rows
+    with new_test_table(cql, test_keyspace, 'pk int, ck1 int, ck2 int, data text, primary key (pk, ck1, ck2)') as table:
+        cql.execute(f'CREATE INDEX ON {table}(ck1)')
+        stmt = cql.prepare(f'INSERT INTO {table} (pk, ck1, ck2, data) VALUES (?, ?, ?, ?)')
+        cql.execute(stmt, [1, 1, 1, 'A' * row_size])
+        cql.execute(stmt, [1, 1, 2, 'B' * row_size])
+        cql.execute(stmt, [1, 1, 3, 'C' * row_size])
+        cql.execute(stmt, [1, 1, 4, 'D' * row_size])
+        cql.execute(stmt, [1, 1, 5, 'E' * row_size])
+        stmt = SimpleStatement(f'SELECT pk, ck2, data FROM {table} WHERE ck1 = 1 LIMIT 3')
+        rs = list(cql.execute(stmt))
+        rows = [(col[0], col[1]) for col in rs]
+        assert rows == [(1,1), (1,2), (1,3)]
+
