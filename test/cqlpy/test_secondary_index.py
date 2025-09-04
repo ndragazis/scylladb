@@ -2147,13 +2147,3 @@ def test_limit_partition_slice_across_pages(cql, test_keyspace):
                 result = list(cql.execute(stmt))
                 expected_all = [(1,1), (1,2), (1,3), (2,1), (2,2), (2,3)]
                 assert sorted(result) == sorted(expected_all[:limit])
-                # print(f"result={result}, expected={expected_all[:limit]}")
-        # assert False
-        # # Test LIMIT within a single partition slice - succeeds.
-        # rs = cql.execute(f'SELECT pk, ck2 FROM {table} WHERE ck1 = 1 LIMIT 1')
-        # assert sorted(list(rs)) == [(1,1)]
-        # assert rs.has_more_pages == False
-        # # Test LIMIT across partition slices - reproduces #22158.
-        # rs = cql.execute(f'SELECT pk, ck2 FROM {table} WHERE ck1 = 1 LIMIT 3')
-        # assert sorted(list(rs)) == [(1,1), (1,2), (2,1)]
-        # assert rs.has_more_pages == False
