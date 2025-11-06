@@ -90,6 +90,18 @@ public:
         , _system_key(std::move(system_key))
         , _local_provider(std::move(local_provider))
         , _original_options(opts)
+        , _keys_on([this]{
+            switch (_ctxt.get_replicated_keys_version()) {
+            case db::system_keyspace::replicated_key_provider_version_t::v1:
+                return keys_location::sys_repl_keys_ks;
+            case db::system_keyspace::replicated_key_provider_version_t::v1_5:
+                return keys_location::both;
+            case db::system_keyspace::replicated_key_provider_version_t::v2:
+                return keys_location::group0;
+            default:
+                on_internal_error(log, "Unknown replicated key provider version");
+            }
+        }())
     {}
 
 
