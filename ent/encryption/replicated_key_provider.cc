@@ -102,7 +102,40 @@ public:
                 on_internal_error(log, "Unknown replicated key provider version");
             }
         }())
-    {}
+    {
+        if (_keys_on == keys_location::group0) {
+            return;
+        }
+        _ctxt.register_replicated_keys_state_listener([this](db::system_keyspace::replicated_key_provider_version_t version) {
+            switch (version) {
+            case db::system_keyspace::replicated_key_provider_version_t::v1:
+                if (_keys_on == keys_location::sys_repl_keys_ks) {
+                    return;
+                }
+                on_internal_error(log, seastar::format("Cannot downgrade Replicated Key Provider to version v1 (current state: {})", static_cast<int>(_keys_on)));
+            case db::system_keyspace::replicated_key_provider_version_t::v1_5:
+                if (_keys_on == keys_location::both) {
+                    return;
+                }
+                if (_keys_on == keys_location::sys_repl_keys_ks) {
+                    log.info("Replicated Key Provider upgrading to version v1_5");
+                    _keys_on = keys_location::both;
+                    return;
+                }
+                on_internal_error(log, seastar::format("Cannot downgrade Replicated Key Provider to version v1_5 (current state: {})", static_cast<int>(_keys_on)));
+            case db::system_keyspace::replicated_key_provider_version_t::v2:
+                if (_keys_on == keys_location::group0) {
+                    return;
+                }
+                if (_keys_on == keys_location::both) {
+                    log.info("Replicated Key Provider upgrading to version v2");
+                    _keys_on = keys_location::group0;
+                    return;
+                }
+                on_internal_error(log, "Cannot upgrade Replicated Key Provider from v1 to v2 directly.");
+            }
+        });
+    }
 
 
     future<std::tuple<key_ptr, opt_bytes>> key(const key_info&, opt_bytes = {}) override;
@@ -678,13 +711,13 @@ future<> replicated_keys_migration_manager::migrate_to_v2(db::system_keyspace& s
 future<> replicated_keys_migration_manager::upgrade_to_v1_5() {
     log.debug("Notifying replicated key providers about state change to version v1.5");
     co_await _ctxt.set_replicated_keys_version(db::system_keyspace::replicated_key_provider_version_t::v1_5);
-    //co_await _ctxt.notify_replicated_keys_state_change(encryption_context::replicated_key_provider_version_t::v1_5);
+    co_await _ctxt.notify_replicated_keys_state_change(db::system_keyspace::replicated_key_provider_version_t::v1_5);
 }
 
 future<> replicated_keys_migration_manager::upgrade_to_v2() {
     log.debug("Notifying replicated key providers about state change to version v2");
     co_await _ctxt.set_replicated_keys_version(db::system_keyspace::replicated_key_provider_version_t::v2);
-    //co_await _ctxt.notify_replicated_keys_state_change(encryption_context::replicated_key_provider_version_t::v2);
+    co_await _ctxt.notify_replicated_keys_state_change(db::system_keyspace::replicated_key_provider_version_t::v2);
 }
 
 
