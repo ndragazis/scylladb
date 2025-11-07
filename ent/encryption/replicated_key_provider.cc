@@ -102,35 +102,41 @@ public:
                 on_internal_error(log, "Unknown replicated key provider version");
             }
         }())
+        , _upgrade_phaser("replicated_key_provider::upgrade_phaser")
     {
         if (_keys_on == keys_location::group0) {
             return;
         }
-        _ctxt.register_replicated_keys_state_listener([this](db::system_keyspace::replicated_key_provider_version_t version) {
+        _ctxt.register_replicated_keys_state_listener([this](db::system_keyspace::replicated_key_provider_version_t version) -> future<> {
             switch (version) {
             case db::system_keyspace::replicated_key_provider_version_t::v1:
                 if (_keys_on == keys_location::sys_repl_keys_ks) {
-                    return;
+                    co_return;
                 }
                 on_internal_error(log, seastar::format("Cannot downgrade Replicated Key Provider to version v1 (current state: {})", static_cast<int>(_keys_on)));
             case db::system_keyspace::replicated_key_provider_version_t::v1_5:
                 if (_keys_on == keys_location::both) {
-                    return;
+                    co_return;
                 }
                 if (_keys_on == keys_location::sys_repl_keys_ks) {
                     log.info("Replicated Key Provider upgrading to version v1_5");
+                    // Start writing to both tables.
                     _keys_on = keys_location::both;
-                    return;
+                    // Drain all write operations to the old table.
+                    // Ensures that the topology coordinator will start the data migration
+                    // after all writes to the old table have finished.
+                    co_await _upgrade_phaser.advance_and_await();
+                    co_return;
                 }
                 on_internal_error(log, seastar::format("Cannot downgrade Replicated Key Provider to version v1_5 (current state: {})", static_cast<int>(_keys_on)));
             case db::system_keyspace::replicated_key_provider_version_t::v2:
                 if (_keys_on == keys_location::group0) {
-                    return;
+                    co_return;
                 }
                 if (_keys_on == keys_location::both) {
                     log.info("Replicated Key Provider upgrading to version v2");
                     _keys_on = keys_location::group0;
-                    return;
+                    co_return;
                 }
                 on_internal_error(log, "Cannot upgrade Replicated Key Provider from v1 to v2 directly.");
             }
@@ -207,6 +213,7 @@ private:
 
     enum class keys_location { sys_repl_keys_ks, group0, both };
     keys_location _keys_on = keys_location::sys_repl_keys_ks;
+    utils::phased_barrier _upgrade_phaser;
 
     friend class replicated_key_provider_factory;
 
@@ -347,6 +354,10 @@ future<std::tuple<key_ptr, opt_bytes>> replicated_key_provider::key_impl(const k
 }
 
 future<std::tuple<UUID, key_ptr>> replicated_key_provider::get_key(const key_info& info, opt_bytes opt_id, std::optional<group0_ctx> g0_ctx) {
+    // Make a copy of the current keys_on, in case it changes while we're awaiting.
+    auto keys_on = _keys_on;
+    auto p = _upgrade_phaser.start();
+
     if (!_initialized) {
         co_await maybe_initialize_tables();
     }
@@ -384,7 +395,7 @@ future<std::tuple<UUID, key_ptr>> replicated_key_provider::get_key(const key_inf
     auto cipher = info.alg.substr(0, info.alg.find('/')); // e.g. "AES"
 
     auto res = co_await [&] -> future<std::optional<std::tuple<UUID, key_ptr>>> {
-        switch (_keys_on) {
+        switch (keys_on) {
         case keys_location::sys_repl_keys_ks:
         case keys_location::both:
             // Try to find the key in the old table first.
@@ -402,10 +413,10 @@ future<std::tuple<UUID, key_ptr>> replicated_key_provider::get_key(const key_inf
     }
 
     static const char* key_loc_msgs[] = {"", "in group0", "in both tables"};
-    log.debug("No key found. Generating new key{}", key_loc_msgs[static_cast<int>(_keys_on)]);
+    log.debug("No key found. Generating new key{}", key_loc_msgs[static_cast<int>(keys_on)]);
 
     auto [uuid, k] = co_await [&] -> future<std::tuple<UUID, key_ptr>> {
-        switch (_keys_on) {
+        switch (keys_on) {
         case keys_location::sys_repl_keys_ks:
             co_return co_await create_key(info, cipher);
         case keys_location::both: {
