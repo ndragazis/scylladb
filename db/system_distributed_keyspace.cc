@@ -848,12 +848,29 @@ system_distributed_tablets_keyspace::system_distributed_tablets_keyspace(service
     , _started_future(_started_promise.get_future())
 {}
 
+schema_ptr system_distributed_tablets_keyspace::snapshots() {
+    static thread_local auto schema = [] {
+        auto id = generate_legacy_id(NAME, SNAPSHOTS);
+        return schema_builder(NAME, SNAPSHOTS, std::make_optional(id))
+                .with_column("name", utf8_type, column_kind::partition_key)
+                .with_column("created_at", timestamp_type, column_kind::static_column)
+                .with_column("expires_at", timestamp_type, column_kind::static_column)
+                .with_column("datacenter", utf8_type, column_kind::clustering_key)
+                .with_column("bucket_name", utf8_type, column_kind::regular_column)
+                .with_column("prefix", utf8_type, column_kind::regular_column)
+                .with_hash_version()
+                .build();
+    }();
+    return schema;
+}
+
 // This is the set of tables which this node ensures to exist in the cluster.
 // It does that by announcing the creation of these schemas on initialization
 // of the `system_distributed_tablets_keyspace` service (see `create_tables()`), unless it first
 // detects that the table already exists.
 std::vector<schema_ptr> system_distributed_tablets_keyspace::ensured_tables() {
     return {
+        snapshots(),
     };
 }
 
