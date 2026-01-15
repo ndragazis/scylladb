@@ -11,11 +11,14 @@ import logging
 import pytest
 
 from test.pylib.rest_client import HTTPError
+from test.pylib.tablets import get_all_tablet_replicas
 from test.pylib.manager_client import ManagerClient
+from test.pylib.internal_types import ServerInfo, HostID
 from test.cluster.util import parse_replication_options, wait_for_cql_and_get_hosts
 
 
 logger = logging.getLogger(__name__)
+
 
 SYSTEM_TRACES_KS = "system_traces"
 SYSTEM_TRACES_TABLES = {
@@ -26,17 +29,36 @@ SYSTEM_TRACES_TABLES = {
     "sessions_time_idx",
 }
 
+
 AUDIT_KS = "audit"
 AUDIT_TABLES = {
     "audit_log",
 }
+
 
 AUTO_RF_KEYSPACES = (
     (AUDIT_KS, AUDIT_TABLES, 3),
     (SYSTEM_TRACES_KS, SYSTEM_TRACES_TABLES, 2),
 )
 
-async def verify_schema(cql, ks: str, tables: set[str], expected_replication: dict[str, list[str]], timeout: int = 10, retry_interval: int = 1) -> None:
+
+async def add_servers_and_update_map(manager: ManagerClient, servers: list[ServerInfo], host_to_dc_rack: dict[HostID, tuple[str, str]], count: int, property_file: list[dict[str, str]] | dict[str, str], config: dict[str, str] | None = None) -> list[ServerInfo]:
+    """Add multiple servers and update the host_to_dc_rack map incrementally."""
+    new_servers = await manager.servers_add(count, property_file=property_file, config=config)
+    servers.extend(new_servers)
+    for server in new_servers:
+        host_id = await manager.get_host_id(server.server_id)
+        host_to_dc_rack[host_id] = (server.datacenter, server.rack)
+    return new_servers
+
+
+async def add_server_and_update_map(manager: ManagerClient, servers: list[ServerInfo], host_to_dc_rack: dict[HostID, tuple[str, str]], property_file: dict[str, str], config: dict[str, str] | None = None) -> ServerInfo:
+    """Add a server and update the host_to_dc_rack map incrementally."""
+    new_servers = await add_servers_and_update_map(manager, servers, host_to_dc_rack, 1, [property_file], config)
+    return new_servers[0]
+
+
+async def verify_schema(cql, manager: ManagerClient, servers: list[ServerInfo], host_to_dc_rack: dict[HostID, tuple[str, str]], ks: str, tables: set[str], expected_replication: dict[str, list[str]], timeout: int = 10, retry_interval: int = 1) -> None:
     async def _check():
         # Verify keyspace exists
         rows = await cql.run_async(f"SELECT replication, replication_v2 FROM system_schema.keyspaces WHERE keyspace_name='{ks}'")
@@ -57,6 +79,20 @@ async def verify_schema(cql, ks: str, tables: set[str], expected_replication: di
         rows = await cql.run_async(f"SELECT table_name FROM system_schema.tables WHERE keyspace_name = '{ks}'")
         found_tables = {row.table_name for row in rows}
         assert found_tables == tables
+
+        # Verify tablet replicas
+        for table in tables:
+            tablets = await get_all_tablet_replicas(manager, servers[0], ks, table)
+            for tablet in tablets:
+                # Group replicas by DC and collect their racks
+                dc_to_racks: dict[str, set[str]] = {}
+                for host_id, _ in tablet.replicas:
+                    dc, rack = host_to_dc_rack[host_id]
+                    dc_to_racks.setdefault(dc, set()).add(rack)
+                # Verify racks match expected replication options for each DC
+                for dc, racks in dc_to_racks.items():
+                    expected_racks = set(expected_replication.get(dc, []))
+                    assert racks == expected_racks, f"Tablet replicas mismatch for {ks}.{table} in DC {dc}: expected racks {expected_racks}, got {racks}"
 
     start = time.time()
     last_error = None
@@ -83,20 +119,22 @@ async def test_auto_rf_ks_coverage(manager: ManagerClient):
     cfg_audit = {"audit": "table"}
 
     logger.info("Create first rack and verify that the schemas are created")
-    await manager.server_add(property_file={"dc": "dc1", "rack": "r1"}, config=cfg_audit)
+    servers = []
+    host_to_dc_rack = {}
+    await add_server_and_update_map(manager, servers, host_to_dc_rack, {"dc": "dc1", "rack": "r1"}, cfg_audit)
     cql = manager.get_cql()
     for ks, tables, _ in AUTO_RF_KEYSPACES:
-        await verify_schema(cql, ks, tables, {'dc1': ['r1']})
+        await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1']})
 
     logger.info("Add a second rack and verify it is added to the RF")
-    await manager.server_add(property_file={"dc": "dc1", "rack": "r2"}, config=cfg_audit)
+    await add_server_and_update_map(manager, servers, host_to_dc_rack, {"dc": "dc1", "rack": "r2"}, cfg_audit)
     for ks, tables, _ in AUTO_RF_KEYSPACES:
-        await verify_schema(cql, ks, tables, {'dc1': ['r1', 'r2']})
+        await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1', 'r2']})
 
     logger.info("Add a second dc with two racks and verify it is added to the RF")
-    await manager.servers_add(2, property_file=[{"dc": "dc2", "rack": "r1"}, {"dc": "dc2", "rack": "r2"}], config=cfg_audit)
+    await add_servers_and_update_map(manager, servers, host_to_dc_rack, 2, [{"dc": "dc2", "rack": "r1"}, {"dc": "dc2", "rack": "r2"}], cfg_audit)
     for ks, tables, _ in AUTO_RF_KEYSPACES:
-        await verify_schema(cql, ks, tables, {'dc1': ['r1', 'r2'], 'dc2': ['r1', 'r2']})
+        await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1', 'r2'], 'dc2': ['r1', 'r2']})
 
 
 @pytest.mark.asyncio
@@ -116,54 +154,60 @@ async def test_auto_rf_behavior(manager: ManagerClient):
     cfg_audit = {"audit": "table"}
 
     logger.info("Create first rack and verify that schema is created")
-    servers = [await manager.server_add(property_file={"dc": "dc1", "rack": "r1"}, config=cfg_audit)]
+    servers = []
+    host_to_dc_rack = {}
+    await add_server_and_update_map(manager, servers, host_to_dc_rack, {"dc": "dc1", "rack": "r1"}, cfg_audit)
     cql = manager.get_cql()
-    await verify_schema(cql, ks, tables, {'dc1': ['r1']})
+    await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1']})
 
     logger.info("Check schema after restart")
     await asyncio.gather(*[manager.server_stop(s.server_id) for s in servers])
     await asyncio.gather(*[manager.server_start(s.server_id) for s in servers])
     cql = manager.get_cql()
     await wait_for_cql_and_get_hosts(cql, servers, time.time() + 60)
-    await verify_schema(cql, ks, tables, {'dc1': ['r1']})
+    # After restart, host_ids might change, so rebuild the map
+    host_to_dc_rack = {}
+    for s in servers:
+        host_id = await manager.get_host_id(s.server_id)
+        host_to_dc_rack[host_id] = (s.datacenter, s.rack)
+    await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1']})
 
     logger.info("Add a node in an existing rack")
-    servers.append(await manager.server_add(property_file={"dc": "dc1", "rack": "r1"}, config=cfg_audit))
-    await verify_schema(cql, ks, tables, {'dc1': ['r1']}, timeout=0)
+    await add_server_and_update_map(manager, servers, host_to_dc_rack, {"dc": "dc1", "rack": "r1"}, cfg_audit)
+    await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1']}, timeout=0)
 
     logger.info("Add a second rack with two nodes and verify it is added to the RF")
-    r2_servers = await manager.servers_add(2, property_file=[{"dc": "dc1", "rack": "r2"}, {"dc": "dc1", "rack": "r2"}], config=cfg_audit)
-    servers.extend(r2_servers)
-    await verify_schema(cql, ks, tables, {'dc1': ['r1', 'r2']})
+    r2_servers = await add_servers_and_update_map(manager, servers, host_to_dc_rack, 2, [{"dc": "dc1", "rack": "r2"}, {"dc": "dc1", "rack": "r2"}], cfg_audit)
+    await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1', 'r2']})
 
     logger.info("Add a third rack and verify it is added to the RF")
-    servers.append(await manager.server_add(property_file={"dc": "dc1", "rack": "r3"}, config=cfg_audit))
-    await verify_schema(cql, ks, tables, {'dc1': ['r1', 'r2', 'r3']})
+    await add_server_and_update_map(manager, servers, host_to_dc_rack, {"dc": "dc1", "rack": "r3"}, cfg_audit)
+    await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1', 'r2', 'r3']})
 
     logger.info("Add a fourth rack and verify it is not added to the RF (RF goal 3 has been reached)")
-    servers.append(await manager.server_add(property_file={"dc": "dc1", "rack": "r4"}, config=cfg_audit))
-    await verify_schema(cql, ks, tables, {'dc1': ['r1', 'r2', 'r3']}, timeout=0)
+    await add_server_and_update_map(manager, servers, host_to_dc_rack, {"dc": "dc1", "rack": "r4"}, cfg_audit)
+    await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1', 'r2', 'r3']}, timeout=0)
     rows = await cql.run_async(f"SELECT * FROM system.topology_requests WHERE request_type='keyspace_rf_change' AND new_keyspace_rf_change_ks_name='{ks}' AND done=False ALLOW FILTERING")
     assert len(rows) == 0, f"Unexpected pending RF change requests for keyspace {ks}"
 
     logger.info("Add a node in a new dc and verify it is added to the RF of the new DC")
-    servers.append(await manager.server_add(property_file={"dc": "dc2", "rack": "r1"}, config=cfg_audit))
-    await verify_schema(cql, ks, tables, {'dc1': ['r1', 'r2', 'r3'], 'dc2': ['r1']})
+    await add_server_and_update_map(manager, servers, host_to_dc_rack, {"dc": "dc2", "rack": "r1"}, cfg_audit)
+    await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1', 'r2', 'r3'], 'dc2': ['r1']})
 
     logger.info("Add a zero-token node in a new dc and verify the RF is not changed")
     cfg_zero_token = {"join_ring": "false"}
-    servers.append(await manager.server_add(property_file={"dc": "zero-token-dc", "rack": "zero-token-rack"}, config=cfg_audit | cfg_zero_token))
-    await verify_schema(cql, ks, tables, {'dc1': ['r1', 'r2', 'r3'], 'dc2': ['r1']})
+    await add_server_and_update_map(manager, servers, host_to_dc_rack, {"dc": "zero-token-dc", "rack": "zero-token-rack"}, cfg_audit | cfg_zero_token)
+    await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1', 'r2', 'r3'], 'dc2': ['r1']})
 
     logger.info("Remove the second rack from the replication options and verify auto-RF will add the fourth rack to the rack list")
     await cql.run_async(f"ALTER KEYSPACE {ks} WITH replication = {{'class': 'NetworkTopologyStrategy', 'dc1': ['r1', 'r3'], 'dc2': ['r1']}}")
-    await verify_schema(cql, ks, tables, {'dc1': ['r1', 'r3', 'r4'], 'dc2': ['r1']})
+    await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1', 'r3', 'r4'], 'dc2': ['r1']})
 
     logger.info("Remove the fourth rack from the replication options and bring back the second rack")
     await cql.run_async(f"ALTER KEYSPACE {ks} WITH replication = {{'class': 'NetworkTopologyStrategy', 'dc1': ['r1', 'r3'], 'dc2': ['r1']}}")
-    await verify_schema(cql, ks, tables, {'dc1': ['r1', 'r3'], 'dc2': ['r1']})
+    await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1', 'r3'], 'dc2': ['r1']})
     await cql.run_async(f"ALTER KEYSPACE {ks} WITH replication = {{'class': 'NetworkTopologyStrategy', 'dc1': ['r1', 'r2', 'r3'], 'dc2': ['r1']}}")
-    await verify_schema(cql, ks, tables, {'dc1': ['r1', 'r2', 'r3'], 'dc2': ['r1']})
+    await verify_schema(cql, manager, servers, host_to_dc_rack, ks, tables, {'dc1': ['r1', 'r2', 'r3'], 'dc2': ['r1']})
 
     logger.info("Decommission a node from a rack with multiple nodes")
     await manager.decommission_node(r2_servers[0].server_id)
