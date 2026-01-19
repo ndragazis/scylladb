@@ -1391,7 +1391,9 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
             muts.emplace_back(builder.build());
             muts.emplace_back(rtbuilder.build());
 
-            rtlogger.info("Scheduling auto RF change for keyspace {}", ks_name);
+            auto old_options = ks_md->strategy_options();
+            old_options.emplace("class", ks_md->strategy_name());
+            rtlogger.info("Scheduling auto RF change for keyspace {}: old replication options={}, new replication options={}", ks_name, old_options, config_options);
             co_await update_topology_state(std::move(guard), std::move(muts),
                     seastar::format("auto-rf: schedule keyspace_rf_change for {}", ks_name));
             co_return std::nullopt;
