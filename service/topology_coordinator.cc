@@ -1281,6 +1281,13 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
         }
         rtlogger.debug("Racks with tokens by DC: {}", racks_with_tokens_by_dc);
 
+        struct rf_change_candidate {
+            sstring ks_name;
+            locator::replication_strategy_config_options old_options;
+            locator::replication_strategy_config_options new_options;
+        };
+        std::optional<rf_change_candidate> candidate;
+
         for (const auto& [ks_name, goal] : get_auto_rf_keyspaces()) {
             if (!_db.has_keyspace(ks_name)) {
                 rtlogger.debug("Keyspace {} does not exist, skipping", ks_name);
@@ -1302,8 +1309,8 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                 continue;
             }
 
-            locator::replication_strategy_config_options config_options;
-            config_options["class"] = "org.apache.cassandra.locator.NetworkTopologyStrategy";
+            locator::replication_strategy_config_options new_options;
+            new_options["class"] = "org.apache.cassandra.locator.NetworkTopologyStrategy";
             bool rf_changed = false;
 
             for (const auto& [dc, rf] : ks_md->strategy_options()) {
@@ -1327,7 +1334,7 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                     // The `rf_changed` flag ensures that only one change is made per keyspace per invocation.
                     // That's because each tablet can have only one pending replica.
                     // All other per-DC RFs are just copied as-is.
-                    config_options.emplace(dc, rf);
+                    new_options.emplace(dc, rf);
                     continue;
                 }
                 auto rf_data = locator::replication_factor_data(rf);
@@ -1349,16 +1356,16 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                         }
                     }
                 }
-                config_options.emplace(dc, std::move(rack_list));
+                new_options.emplace(dc, std::move(rack_list));
             }
 
             if (!rf_changed) {
                 // Check for new DCs.
                 for (const auto& [dc, racks] : racks_with_tokens_by_dc) {
-                    if (config_options.contains(dc)) {
+                    if (new_options.contains(dc)) {
                         continue;
                     }
-                    config_options.emplace(dc, locator::rack_list{*racks.begin()});
+                    new_options.emplace(dc, locator::rack_list{*racks.begin()});
                     rf_changed = true;
                     break;
                 }
@@ -1369,9 +1376,16 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                 continue;
             }
 
+            auto old_options = ks_md->strategy_options();
+            old_options.emplace("class", ks_md->strategy_name());
+            candidate.emplace(ks_name, old_options, new_options);
+            break;
+        }
+
+        if (candidate) {
             // Build ALTER KEYSPACE replication options.
             cql3::statements::ks_prop_defs props;
-            props.add_property(cql3::statements::ks_prop_defs::KW_REPLICATION, config_options);
+            props.add_property(cql3::statements::ks_prop_defs::KW_REPLICATION, candidate->new_options);
             auto flattened = props.flattened();
 
             // Schedule a keyspace_rf_change global request.
@@ -1385,21 +1399,19 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
 
             builder.queue_global_topology_request_id(global_request_id);
             rtbuilder.set("request_type", global_topology_request::keyspace_rf_change)
-                     .set_new_keyspace_rf_change_data(ks_name, flattened);
+                     .set_new_keyspace_rf_change_data(candidate->ks_name, flattened);
 
             utils::chunked_vector<canonical_mutation> muts;
             muts.emplace_back(builder.build());
             muts.emplace_back(rtbuilder.build());
 
-            auto old_options = ks_md->strategy_options();
-            old_options.emplace("class", ks_md->strategy_name());
-            rtlogger.info("Scheduling auto RF change for keyspace {}: old replication options={}, new replication options={}", ks_name, old_options, config_options);
+            rtlogger.info("Scheduling auto RF change for keyspace {}: old replication options={}, new replication options={}", candidate->ks_name, candidate->old_options, candidate->new_options);
             co_await update_topology_state(std::move(guard), std::move(muts),
-                    seastar::format("auto-rf: schedule keyspace_rf_change for {}", ks_name));
+                    seastar::format("auto-rf: schedule keyspace_rf_change for {}", candidate->ks_name));
             co_return std::nullopt;
+        } else {
+            co_return std::move(guard);
         }
-
-        co_return std::move(guard);
     }
 
     future<group0_guard> global_token_metadata_barrier(group0_guard&& guard, std::unordered_set<raft::server_id> exclude_nodes = {}, bool* fenced = nullptr) {
