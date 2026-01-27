@@ -1269,7 +1269,8 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
             rtlogger.debug("Injection point skip_auto_rf_change enabled, skipping auto RF change check");
             co_return std::move(guard);
         }
-        if (!_feature_service.rack_list_rf) {
+        bool rack_list_enabled = utils::get_local_injector().enter("create_with_numeric") ? false : _feature_service.rack_list_rf;
+        if (!rack_list_enabled) {
             rtlogger.debug("rack_list_rf feature is disabled, skipping auto RF change check");
             co_return std::move(guard);
         }
