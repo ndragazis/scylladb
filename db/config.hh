@@ -367,6 +367,7 @@ public:
     named_value<bool> enable_cache;
     named_value<bool> enable_commitlog;
     named_value<bool> volatile_system_keyspace_for_testing;
+    named_value<bool> auto_adjust_replication_for_tablet_based_system_keyspaces;
     named_value<uint16_t> api_port;
     named_value<sstring> api_address;
     named_value<sstring> api_ui_dir;
