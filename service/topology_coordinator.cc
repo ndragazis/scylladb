@@ -1297,6 +1297,10 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
         std::optional<rf_change_candidate> candidate;
 
         for (const auto& [ks_name, goal] : get_auto_rf_keyspaces()) {
+            if (is_internal_keyspace(ks_name) && !_db.get_config().auto_adjust_replication_for_tablet_based_system_keyspaces()) {
+                rtlogger.debug("Keyspace {} is an internal keyspace and auto_adjust_replication_for_tablet_based_system_keyspaces is disabled, skipping", ks_name);
+                continue;
+            }
             if (!_db.has_keyspace(ks_name)) {
                 rtlogger.debug("Keyspace {} does not exist, skipping", ks_name);
                 continue;
