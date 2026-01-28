@@ -8,6 +8,7 @@ extra_scylla_config_options:
     enable_user_defined_functions: False
     rf_rack_valid_keyspaces: True
     tablets_mode_for_new_keyspaces: enabled
+    auto_adjust_replication_for_tablet_based_system_keyspaces: False
 run_first:
   - test_group0_schema_versioning
   - test_tablets_migration
