@@ -20,7 +20,10 @@
 #include "exceptions/exceptions.hh"
 #include "gms/feature_service.hh"
 #include "db/config.hh"
+#include "audit/audit_cf_storage_helper.hh"
 #include <random>
+
+bool is_internal_keyspace(std::string_view name);
 
 namespace cql3 {
 
@@ -417,7 +420,10 @@ lw_shared_ptr<data_dictionary::keyspace_metadata> ks_prop_defs::as_ks_metadata(s
             ? std::optional<unsigned>(0) : std::nullopt;
     auto initial_tablets = get_initial_tablets(default_initial_tablets, cfg.enforce_tablets());
     bool uses_tablets = initial_tablets.has_value();
-    bool rack_list_enabled = utils::get_local_injector().enter("create_with_numeric") ? false : feat.rack_list_rf;
+    // The create_with_numeric injection is used for testing user keyspaces with numeric RF.
+    // Internal keyspaces (like system_traces) and audit should always use rack-lists when the feature is enabled.
+    bool skip_injection = is_internal_keyspace(ks_name) || ks_name == audit::audit_cf_storage_helper::KEYSPACE_NAME;
+    bool rack_list_enabled = (!skip_injection && utils::get_local_injector().enter("create_with_numeric")) ? false : feat.rack_list_rf;
     auto options = prepare_options(sc, tm, cfg.rf_rack_valid_keyspaces(), cfg.enforce_rack_list(), get_replication_options(), {}, rack_list_enabled, uses_tablets);
     return data_dictionary::keyspace_metadata::new_keyspace(ks_name, sc,
             std::move(options), initial_tablets, get_consistency_option(), get_boolean(KW_DURABLE_WRITES, true), get_storage_options());
@@ -433,7 +439,10 @@ lw_shared_ptr<data_dictionary::keyspace_metadata> ks_prop_defs::as_ks_metadata_u
         throw exceptions::invalid_request_exception("Cannot alter replication strategy vnode/tablets flavor");
     }
     auto sc = get_replication_strategy_class();
-    bool rack_list_enabled = utils::get_local_injector().enter("create_with_numeric") ? false : feat.rack_list_rf;
+    // The create_with_numeric injection is used for testing user keyspaces with numeric RF.
+    // Internal keyspaces (like system_traces) and audit should always use rack-lists when the feature is enabled.
+    bool skip_injection = is_internal_keyspace(old->name()) || old->name() == audit::audit_cf_storage_helper::KEYSPACE_NAME;
+    bool rack_list_enabled = (!skip_injection && utils::get_local_injector().enter("create_with_numeric")) ? false : feat.rack_list_rf;
     if (sc) {
         options = prepare_options(*sc, tm, cfg.rf_rack_valid_keyspaces(), cfg.enforce_rack_list(), get_replication_options(), old_options, rack_list_enabled, uses_tablets);
     } else {
