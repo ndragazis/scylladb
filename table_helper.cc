@@ -13,6 +13,7 @@
 #include <seastar/coroutine/parallel_for_each.hh>
 #include "table_helper.hh"
 #include "cql3/query_processor.hh"
+#include "cql3/statements/ks_prop_defs.hh"
 #include "cql3/statements/create_table_statement.hh"
 #include "cql3/statements/modification_statement.hh"
 #include "replica/database.hh"
@@ -158,26 +159,27 @@ future<> table_helper::setup_keyspace(cql3::query_processor& qp, service::migrat
         throw std::invalid_argument("setup_keyspace called with table_helper for different keyspace");
     }
 
-    data_dictionary::database db = qp.db();
+    using ks_prop_defs = cql3::statements::ks_prop_defs;
 
-    locator::replication_strategy_config_options opts;
-    opts["replication_factor"] = replication_factor;
-    auto ksm = keyspace_metadata::new_keyspace(keyspace_name, "org.apache.cassandra.locator.SimpleStrategy", std::move(opts), std::nullopt, std::nullopt);
+    data_dictionary::database db = qp.db();
 
     while (!db.has_keyspace(keyspace_name)) {
         auto group0_guard = co_await mm.start_group0_operation();
         auto ts = group0_guard.write_timestamp();
 
         if (!db.has_keyspace(keyspace_name)) {
+            ks_prop_defs props;
             locator::replication_strategy_config_options opts;
-            if (replication_strategy_name == "org.apache.cassandra.locator.NetworkTopologyStrategy") {
-                for (const auto &dc: qp.proxy().get_token_metadata_ptr()->get_topology().get_datacenters())
-                    opts[dc] = replication_factor;
+            opts[ks_prop_defs::REPLICATION_STRATEGY_CLASS_KEY] = replication_strategy_name;
+            opts[ks_prop_defs::REPLICATION_FACTOR_KEY] = replication_factor;
+            props.add_property(ks_prop_defs::KW_REPLICATION, std::move(opts));
+            props.add_property(ks_prop_defs::KW_DURABLE_WRITES, "true");
+            if (initial_tablets) {
+                props.add_property(ks_prop_defs::KW_TABLETS, ks_prop_defs::map_type{{"initial", to_sstring(*initial_tablets)}});
             }
-            else {
-                opts["replication_factor"] = replication_factor;
-            }
-            auto ksm = keyspace_metadata::new_keyspace(keyspace_name, replication_strategy_name, std::move(opts), initial_tablets, std::nullopt, true);
+
+            props.validate();
+            auto ksm = props.as_ks_metadata(sstring(keyspace_name), *qp.proxy().get_token_metadata_ptr(), db.features(), db.get_config());
             try {
                 co_await mm.announce(service::prepare_new_keyspace_announcement(db.real_database(), ksm, ts),
                         std::move(group0_guard), seastar::format("table_helper: create {} keyspace", keyspace_name));
@@ -186,6 +188,8 @@ future<> table_helper::setup_keyspace(cql3::query_processor& qp, service::migrat
             }
         }
     }
+
+    auto ksm = db.find_keyspace(keyspace_name).metadata();
 
     qs.get_client_state().set_keyspace(db.real_database(), keyspace_name);
 
