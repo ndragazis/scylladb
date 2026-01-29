@@ -56,6 +56,17 @@ public:
     static constexpr auto DEFAULT_REPLICATION_STRATEGY_CLASS = "NetworkTopologyStrategy";
 
     static constexpr auto REPLICATION_FACTOR_KEY = "replication_factor";
+
+    static locator::replication_strategy_config_options prepare_options(
+            const sstring& strategy_class,
+            const locator::token_metadata& tm,
+            bool rf_rack_valid_keyspaces,
+            bool enforce_rack_list,
+            locator::replication_strategy_config_options options,
+            const locator::replication_strategy_config_options& old_options,
+            bool rack_list_enabled,
+            bool uses_tablets);
+
 private:
     std::optional<sstring> _strategy_class;
 public:
