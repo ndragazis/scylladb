@@ -67,7 +67,10 @@ async def verify_schema(cql, manager: ManagerClient, servers: list[ServerInfo], 
         expected_repl_strategy = 'org.apache.cassandra.locator.NetworkTopologyStrategy'
         assert replication.get('class') == expected_repl_strategy, f"Invalid replication class for keyspace {ks}: expected = {expected_repl_strategy}, actual = {replication.get('class')}"
         replication.pop('class')
-        assert replication == expected_replication, f"Invalid replication options for keyspace {ks}: expected = {expected_replication}, actual = {replication}"
+        # Compare as sets since rack order doesn't matter
+        replication_sets = {dc: set(racks) for dc, racks in replication.items()}
+        expected_sets = {dc: set(racks) for dc, racks in expected_replication.items()}
+        assert replication_sets == expected_sets, f"Invalid replication options for keyspace {ks}: expected = {expected_replication}, actual = {replication}"
 
         # Verify tablets are enabled
         rows = await cql.run_async(f"SELECT initial_tablets FROM system_schema.scylla_keyspaces WHERE keyspace_name = '{ks}'")
