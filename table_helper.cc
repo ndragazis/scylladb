@@ -10,6 +10,7 @@
 #include "cql3/statements/property_definitions.hh"
 #include "utils/assert.hh"
 #include <seastar/core/coroutine.hh>
+#include <seastar/core/format.hh>
 #include <seastar/coroutine/parallel_for_each.hh>
 #include "table_helper.hh"
 #include "cql3/query_processor.hh"
@@ -18,8 +19,58 @@
 #include "replica/database.hh"
 #include "service/migration_manager.hh"
 #include "service/storage_proxy.hh"
+#include "locator/token_metadata.hh"
+#include "locator/abstract_replication_strategy.hh"
+#include "exceptions/exceptions.hh"
+#include "gms/feature_service.hh"
+#include <random>
+#include <ranges>
+#include <unordered_set>
 
 static logging::logger tlogger("table_helper");
+
+static
+locator::replication_strategy_config_option
+expand_to_racks(const locator::token_metadata& tm,
+                const sstring& dc,
+                const locator::replication_strategy_config_option& rf,
+                const locator::replication_strategy_config_options& old_options)
+{
+    auto dc_racks = locator::get_allowed_racks(tm, dc);
+
+    tlogger.debug("expand_to_racks: dc={} rf={} allowed_racks={}", dc, rf, dc_racks);
+
+    if (!tm.get_topology().get_datacenters().contains(dc)) {
+        throw exceptions::configuration_exception(fmt::format("Unrecognized datacenter name '{}'", dc));
+    }
+
+    auto data = locator::abstract_replication_strategy::parse_replication_factor(rf);
+    data.validate(std::ranges::to<std::unordered_set<sstring>>(dc_racks));
+
+    if (data.is_rack_based()) {
+        return rf;
+    }
+
+    if (data.count() == 0) {
+        return locator::rack_list();
+    }
+
+    if (data.count() > dc_racks.size()) {
+        throw exceptions::configuration_exception(fmt::format(
+                "Replication factor {} exceeds the number of racks ({}) in dc {}", data.count(), dc_racks.size(), dc));
+    }
+
+    // For new keyspaces, old_options is empty, so we skip the ALTER logic
+
+    // If the replication factor is less than the number of racks, pick rf racks at random.
+    if (data.count() < dc_racks.size()) {
+        static thread_local auto gen = std::default_random_engine(std::random_device{}());
+        std::ranges::shuffle(dc_racks, gen);
+        dc_racks.resize(data.count());
+    }
+
+    return dc_racks;
+}
 
 static schema_ptr parse_new_cf_statement(cql3::query_processor& qp, const sstring& create_cql) {
     auto db = qp.db();
@@ -170,9 +221,21 @@ future<> table_helper::setup_keyspace(cql3::query_processor& qp, service::migrat
 
         if (!db.has_keyspace(keyspace_name)) {
             locator::replication_strategy_config_options opts;
+            auto tm = qp.proxy().get_token_metadata_ptr();
+            auto& feat = qp.db().features();
+            bool rack_list_enabled = feat.rack_list_rf;
+            bool uses_tablets = initial_tablets.has_value();
+            bool auto_expand_racks = uses_tablets && rack_list_enabled;
+
             if (replication_strategy_name == "org.apache.cassandra.locator.NetworkTopologyStrategy") {
-                for (const auto &dc: qp.proxy().get_token_metadata_ptr()->get_topology().get_datacenters())
-                    opts[dc] = replication_factor;
+                if (auto_expand_racks) {
+                    for (const auto &dc: tm->get_topology().get_datacenters()) {
+                        opts[dc] = expand_to_racks(*tm, dc, replication_factor, {});
+                    }
+                } else {
+                    for (const auto &dc: tm->get_topology().get_datacenters())
+                        opts[dc] = replication_factor;
+                }
             }
             else {
                 opts["replication_factor"] = replication_factor;
