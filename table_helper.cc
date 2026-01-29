@@ -14,14 +14,63 @@
 #include <seastar/coroutine/parallel_for_each.hh>
 #include "table_helper.hh"
 #include "cql3/query_processor.hh"
-#include "cql3/statements/ks_prop_defs.hh"
 #include "cql3/statements/create_table_statement.hh"
 #include "cql3/statements/modification_statement.hh"
 #include "replica/database.hh"
 #include "service/migration_manager.hh"
 #include "service/storage_proxy.hh"
+#include "locator/token_metadata.hh"
+#include "locator/abstract_replication_strategy.hh"
+#include "exceptions/exceptions.hh"
+#include "gms/feature_service.hh"
+#include <random>
+#include <ranges>
+#include <unordered_set>
 
 static logging::logger tlogger("table_helper");
+
+static
+locator::replication_strategy_config_option
+expand_to_racks(const locator::token_metadata& tm,
+                const sstring& dc,
+                const locator::replication_strategy_config_option& rf,
+                const locator::replication_strategy_config_options& old_options)
+{
+    auto dc_racks = locator::get_allowed_racks(tm, dc);
+
+    tlogger.debug("expand_to_racks: dc={} rf={} allowed_racks={}", dc, rf, dc_racks);
+
+    if (!tm.get_topology().get_datacenters().contains(dc)) {
+        throw exceptions::configuration_exception(fmt::format("Unrecognized datacenter name '{}'", dc));
+    }
+
+    auto data = locator::abstract_replication_strategy::parse_replication_factor(rf);
+    data.validate(std::ranges::to<std::unordered_set<sstring>>(dc_racks));
+
+    if (data.is_rack_based()) {
+        return rf;
+    }
+
+    if (data.count() == 0) {
+        return locator::rack_list();
+    }
+
+    if (data.count() > dc_racks.size()) {
+        throw exceptions::configuration_exception(fmt::format(
+                "Replication factor {} exceeds the number of racks ({}) in dc {}", data.count(), dc_racks.size(), dc));
+    }
+
+    // For new keyspaces, old_options is empty, so we skip the ALTER logic
+
+    // If the replication factor is less than the number of racks, pick rf racks at random.
+    if (data.count() < dc_racks.size()) {
+        static thread_local auto gen = std::default_random_engine(std::random_device{}());
+        std::ranges::shuffle(dc_racks, gen);
+        dc_racks.resize(data.count());
+    }
+
+    return dc_racks;
+}
 
 static schema_ptr parse_new_cf_statement(cql3::query_processor& qp, const sstring& create_cql) {
     auto db = qp.db();
@@ -162,29 +211,36 @@ future<> table_helper::setup_keyspace(cql3::query_processor& qp, service::migrat
 
     data_dictionary::database db = qp.db();
 
-    lw_shared_ptr<data_dictionary::keyspace_metadata> ksm;
+    locator::replication_strategy_config_options opts;
+    opts["replication_factor"] = replication_factor;
+    auto ksm = keyspace_metadata::new_keyspace(keyspace_name, "org.apache.cassandra.locator.SimpleStrategy", std::move(opts), std::nullopt, std::nullopt);
 
     while (!db.has_keyspace(keyspace_name)) {
         auto group0_guard = co_await mm.start_group0_operation();
         auto ts = group0_guard.write_timestamp();
 
         if (!db.has_keyspace(keyspace_name)) {
+            locator::replication_strategy_config_options opts;
             auto tm = qp.proxy().get_token_metadata_ptr();
             auto& feat = qp.db().features();
-            const auto& cfg = qp.db().get_config();
+            bool rack_list_enabled = feat.rack_list_rf;
+            bool uses_tablets = initial_tablets.has_value();
+            bool auto_expand_racks = uses_tablets && rack_list_enabled;
 
-            cql3::statements::property_definitions::map_type props;
-            props[sstring(cql3::statements::ks_prop_defs::KW_REPLICATION) + ":" + cql3::statements::ks_prop_defs::REPLICATION_STRATEGY_CLASS_KEY] = replication_strategy_name;
-            props[sstring(cql3::statements::ks_prop_defs::KW_REPLICATION) + ":" + cql3::statements::ks_prop_defs::REPLICATION_FACTOR_KEY] = replication_factor;
-            props[sstring(cql3::statements::ks_prop_defs::KW_DURABLE_WRITES) + ":"] = "true";
-            if (initial_tablets) {
-                props[sstring(cql3::statements::ks_prop_defs::KW_TABLETS) + ":initial"] = std::to_string(*initial_tablets);
+            if (replication_strategy_name == "org.apache.cassandra.locator.NetworkTopologyStrategy") {
+                if (auto_expand_racks) {
+                    for (const auto &dc: tm->get_topology().get_datacenters()) {
+                        opts[dc] = expand_to_racks(*tm, dc, replication_factor, {});
+                    }
+                } else {
+                    for (const auto &dc: tm->get_topology().get_datacenters())
+                        opts[dc] = replication_factor;
+                }
             }
-
-            cql3::statements::ks_prop_defs ks_props(std::move(props));
-            ks_props.validate();
-
-            ksm = ks_props.as_ks_metadata(sstring(keyspace_name), *tm, feat, cfg);
+            else {
+                opts["replication_factor"] = replication_factor;
+            }
+            auto ksm = keyspace_metadata::new_keyspace(keyspace_name, replication_strategy_name, std::move(opts), initial_tablets, std::nullopt, true);
             try {
                 co_await mm.announce(service::prepare_new_keyspace_announcement(db.real_database(), ksm, ts),
                         std::move(group0_guard), seastar::format("table_helper: create {} keyspace", keyspace_name));
@@ -193,8 +249,6 @@ future<> table_helper::setup_keyspace(cql3::query_processor& qp, service::migrat
             }
         }
     }
-
-    ksm = db.real_database().find_keyspace(keyspace_name).metadata();
 
     qs.get_client_state().set_keyspace(db.real_database(), keyspace_name);
 
