@@ -518,10 +518,7 @@ async def test_enforce_rack_list_option(request: pytest.FixtureRequest, manager:
         return repl
 
     injection = "create_with_numeric"
-    config = {
-        "tablets_mode_for_new_keyspaces": "enabled",
-        "error_injections_at_startup": [injection],
-        "auto_adjust_replication_for_tablet_based_system_keyspaces": "true"}
+    config = {"tablets_mode_for_new_keyspaces": "enabled", "error_injections_at_startup": [injection]}
 
     servers = [await manager.server_add(config=config, cmdline=['--smp=2'], property_file={'dc': 'dc1', 'rack': 'rack1a'}),
                 await manager.server_add(config=config, cmdline=['--smp=2'], property_file={'dc': 'dc1', 'rack': 'rack1b'}),
@@ -538,31 +535,6 @@ async def test_enforce_rack_list_option(request: pytest.FixtureRequest, manager:
     await cql.run_async("CREATE KEYSPACE ksv WITH replication = {'class': 'NetworkTopologyStrategy', 'dc1': 2} AND tablets = {'enabled': false}")
 
     [await manager.api.disable_injection(s.ip_addr, injection) for s in servers]
-
-    # Wait for all tablet-based system keyspaces to have replication settings
-    # with rack lists for both DCs (2 racks per DC).
-    async def wait_for_system_keyspaces_rack_lists():
-        system_keyspaces_with_tablets = await manager.api.client.get_json(
-            "/storage_service/keyspaces",
-            host=servers[0].ip_addr,
-            params={"replication": "tablets"}
-        )
-        # Filter for system keyspaces only
-        system_ks_list = [ks for ks in system_keyspaces_with_tablets if ks.startswith("system")]
-        for ks in system_ks_list:
-            repl = await get_replication_options(ks)
-            repl.pop('class', None)
-            # Check that both DCs have rack lists with 2 racks each
-            for dc in ['dc1', 'dc2']:
-                if dc not in repl:
-                    return None
-                if not isinstance(repl[dc], list):
-                    return None
-                if len(repl[dc]) != 2:
-                    return None
-        return True
-
-    await wait_for(wait_for_system_keyspaces_rack_lists, time.time() + 60)
 
     await manager.server_stop_gracefully(servers[-1].server_id)
     failed = False
