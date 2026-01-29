@@ -114,7 +114,10 @@ async def test_auto_rf_ks_coverage(manager: ManagerClient):
     Note: This is a coverage test, not a full behavioral test.
           The full auto RF functionality is tested in `test_auto_rf_behavior`.
     """
-    cfg_audit = {"audit": "table"}
+    cfg_audit = {
+        "audit": "table",
+        "auto_adjust_replication_for_tablet_based_system_keyspaces": "true",
+    }
 
     logger.info("Create first rack and verify that the schemas are created")
     servers = []
@@ -149,7 +152,10 @@ async def test_auto_rf_behavior(manager: ManagerClient):
     """
     ks = AUDIT_KS
     tables = AUDIT_TABLES
-    cfg_audit = {"audit": "table"}
+    cfg_audit = {
+        "audit": "table",
+        "auto_adjust_replication_for_tablet_based_system_keyspaces": "true",
+    }
 
     logger.info("Create first rack and verify that schema is created")
     servers = []
@@ -239,7 +245,10 @@ async def test_auto_rf_audit_ks_late_creation(manager: ManagerClient):
         {"dc": "dc2", "rack": "r1"},
         {"dc": "dc2", "rack": "r2"},
     ]
-    cfg = {"tablet_load_stats_refresh_interval_in_seconds": "1"}
+    cfg = {
+        "tablet_load_stats_refresh_interval_in_seconds": "1",
+        "auto_adjust_replication_for_tablet_based_system_keyspaces": "true",
+    }
     await add_servers_and_update_map(manager, servers, host_to_dc_rack, 4, property_files, config=cfg)
 
     logger.info("Verify the audit schema does not exist yet")
