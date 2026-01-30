@@ -244,10 +244,28 @@ async def wait_until_last_generation_is_in_use(cql: Session):
         logger.info(f"The last generation is already in use.")
 
 async def check_system_topology_and_cdc_generations_v3_consistency(manager: ManagerClient, live_hosts: list[Host], cqls: Optional[list[Session]] = None, ignored_hosts: list[Host] = []):
-    # The cqls parameter is a temporary workaround for testing the recovery mode in the presence of live zero-token
-    # nodes. A zero-token node requires a different cql session not to be ignored by the driver because of empty tokens
-    # in the system.peers table.
+    """
+    Check consistency of system.topology and system.cdc_generations_v3 across all live hosts.
+
+    Precondition: Tablet balancing must be disabled before calling this function.
+    Tablet migrations update fence_version, which can cause spurious consistency check
+    failures if a migration is in progress. Even if your tests do not create
+    tables with tablets, you still need to do it to prevent tablet migrations
+    from system tables. Call manager.disable_tablet_balancing() before calling
+    this function.
+
+    Note: The cqls parameter is a temporary workaround for testing the recovery mode in the
+    presence of live zero-token nodes. A zero-token node requires a different cql session
+    not to be ignored by the driver because of empty tokens in the system.peers table.
+    """
     assert len(live_hosts) != 0
+
+    topo_row = (await manager.cql.run_async("SELECT tablet_balancing_enabled FROM system.topology WHERE key = 'topology'"))[0]
+    assert topo_row.tablet_balancing_enabled == False, (
+        "Tablet balancing must be disabled before calling check_system_topology_and_cdc_generations_v3_consistency. "
+        "Call manager.disable_tablet_balancing() before this function to prevent flaky failures from concurrent "
+        "tablet migrations updating fence_version."
+    )
 
     logging.info(f"Nodes that will be ignored by check_system_topology_and_cdc_generations_v3_consistency: {ignored_hosts}")
 
