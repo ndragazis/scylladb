@@ -32,6 +32,10 @@ async def test_cdc_generation_clearing(manager: ManagerClient):
     servers = [await manager.server_add(cmdline=['--logger-log-level', 'storage_service=trace:raft_topology=trace'],
                                         config={'error_injections_at_startup': ['increase_cdc_generation_leeway']})]
 
+    # Disable tablet balancing to prevent tablet migrations from interfering
+    # with check_system_topology_and_cdc_generations_v3_consistency.
+    await manager.disable_tablet_balancing()
+
     log_file1 = await manager.server_open_log(servers[0].server_id)
     mark: Optional[int] = None
 
@@ -99,6 +103,10 @@ async def test_unpublished_cdc_generations_arent_cleared(manager: ManagerClient)
     servers = await manager.servers_add(1, config={
         'error_injections_at_startup': ['clean_obsolete_cdc_generations_change_ts_ub']
     })
+
+    # Disable tablet balancing to prevent tablet migrations from interfering
+    # with check_system_topology_and_cdc_generations_v3_consistency.
+    await manager.disable_tablet_balancing()
 
     cql = manager.get_cql()
     logger.info("Waiting for driver")

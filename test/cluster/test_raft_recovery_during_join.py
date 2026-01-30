@@ -136,6 +136,10 @@ async def test_raft_recovery_during_join(manager: ManagerClient):
     for h in hosts:
         await delete_raft_group_data(first_group0_id, cql, h)
 
+    # Disable tablet balancing to prevent tablet migrations from interfering
+    # with check_system_topology_and_cdc_generations_v3_consistency.
+    await manager.disable_tablet_balancing()
+
     logging.info('Performing consistency checks after the recovery procedure')
     await wait_for_cdc_generations_publishing(cql, hosts, time.time() + 60)
     await check_token_ring_and_group0_consistency(manager)
