@@ -144,6 +144,10 @@ async def test_topology_upgrade_stuck(request, manager: ManagerClient):
     logging.info("Waiting for CDC generations publishing")
     await wait_for_cdc_generations_publishing(cql, hosts, time.time() + 60)
 
+    # Disable tablet balancing to prevent tablet migrations from interfering
+    # with check_system_topology_and_cdc_generations_v3_consistency.
+    await manager.disable_tablet_balancing()
+
     logging.info("Checking consistency of data in system.topology and system.cdc_generations_v3")
     await check_system_topology_and_cdc_generations_v3_consistency(manager, hosts, ignored_hosts=removed_hosts)
 
