@@ -23,6 +23,8 @@ async def test_coordinator_queue_management(manager: ManagerClient):
        Then it downs one node and creates a queue with two requests:
        bootstrap and decommission. Since none can proceed both should be canceled.
     """
+    await manager.disable_tablet_balancing()
+
     await manager.server_add()
     await manager.server_add()
     servers = await manager.running_servers()
