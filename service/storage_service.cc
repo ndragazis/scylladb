@@ -4057,6 +4057,9 @@ future<> storage_service::decommission() {
 
                 auto temp = tmptr->clone_after_all_left().get();
                 auto num_tokens_after_all_left = temp.sorted_tokens().size();
+                auto num_token_owners_after_all_left = temp.count_normal_token_owners();
+                slogger.info("decommission[{}]: number of tokens after all left: {}, number of token owners after all left: {}",
+                    uuid, num_tokens_after_all_left, num_token_owners_after_all_left);
                 temp.clear_gently().get();
                 if (num_tokens_after_all_left < 2) {
                     throw std::runtime_error("no other normal nodes in the ring; decommission would be pointless");
