@@ -1211,6 +1211,11 @@ public:
                     co_return;
                 }
 
+                // Skip RF=1 tablets - nothing to repair with only one replica.
+                if (tinfo.replicas.size() <= 1) {
+                    co_return;
+                }
+
                 if (skip_tablets.contains(id)) {
                     lblogger.debug("Skipped tablet repair for tablet={} by error injector", gid);
                     co_return;
