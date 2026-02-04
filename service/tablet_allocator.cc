@@ -1249,6 +1249,15 @@ public:
                     co_return;
                 }
 
+                // Skip RF<=1 tablets for auto repair - nothing to repair with
+                // only one replica, and auto-repairing them would cause an
+                // infinite repair loop. User repair requests are still
+                // processed so that the repair_task_info is properly cleared
+                // and the API request doesn't hang.
+                if (tinfo.replicas.size() <= 1 && !info.repair_task_info.is_user_repair_request()) {
+                    co_return;
+                }
+
                 if (skip_tablets.contains(id)) {
                     lblogger.debug("Skipped tablet repair for tablet={} by error injector", gid);
                     co_return;
