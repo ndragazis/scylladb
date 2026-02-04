@@ -765,6 +765,7 @@ async def test_no_uncertainty_for_reads(manager: ManagerClient):
         '--logger-log-level', 'paxos=trace'
     ]
     servers = await manager.servers_add(3, cmdline=cmdline, auto_rack_dc="mydc")
+    await manager.disable_tablet_balancing()
     (cql, hosts) = await manager.get_ready_cql(servers)
 
     logger.info("Create a keyspace")
