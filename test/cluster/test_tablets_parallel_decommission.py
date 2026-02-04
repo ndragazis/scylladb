@@ -192,6 +192,11 @@ async def test_decommission_can_be_canceled(manager: ManagerClient):
                         " 'dc1': ['rack1']} AND tablets = {'initial': 32};") as ks:
         await cql.run_async(f"CREATE TABLE {ks}.tab (pk int PRIMARY KEY);")
 
+        # Wait for tablet migrations from system keyspaces to settle.
+        # Otherwise, the `topology_coordinator_pause_before_processing_backlog` injection
+        # below may be triggered by those migrations instead of the actual decommission request.
+        await manager.api.quiesce_topology(coord_serv.ip_addr)
+
         coord_log = await manager.server_open_log(coord_serv.server_id) # group0 leader
         mark = await coord_log.mark()
         await manager.api.enable_injection(coord_serv.ip_addr, "topology_coordinator_pause_before_processing_backlog", one_shot=True)
