@@ -15,7 +15,6 @@ logger = logging.getLogger(__name__)
 GB = 1024 * 1024 * 1024
 
 @pytest.mark.asyncio
-@pytest.mark.skip_mode(mode='release', reason='error injections are not supported in release mode')
 async def test_balance_empty_tablets(manager: ManagerClient):
 
     # This test checks that size-based load balancing migrates empty tablets of a newly created
@@ -24,7 +23,7 @@ async def test_balance_empty_tablets(manager: ManagerClient):
 
     logger.info('Bootstrapping cluster')
 
-    cfg = { 'error_injections_at_startup': ['short_tablet_stats_refresh_interval'] }
+    cfg = { 'tablet_load_stats_refresh_interval_in_seconds': 1 }
 
     cfg_small = cfg | { 'data_file_capacity': 50 * GB }
     cfg_large = cfg | { 'data_file_capacity': 100 * GB }
@@ -35,12 +34,17 @@ async def test_balance_empty_tablets(manager: ManagerClient):
         '--logger-log-level', 'raft_topology=debug',
     ]
 
+    # Start a node in rack r0 first to absorb system tablet noise.
+    # System keyspaces will be created on this node, isolating the test
+    # nodes in rack r1 from system tablet interference.
+    r0_server = await manager.server_add(config=cfg, cmdline=cmdline, property_file={'dc': 'dc1', 'rack': 'r0'})
+
     servers = [await manager.server_add(config=cfg_large, cmdline=cmdline, property_file={'dc': 'dc1', 'rack': 'r1'})]
     large_host_id = await manager.get_host_id(servers[0].server_id)
 
     cql = manager.get_cql()
 
-    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'initial': 16}") as ks:
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'dc1': ['r1']} AND tablets = {'initial': 16}") as ks:
         for table in ('t1', 't2', 't3'):
             await cql.run_async(f'CREATE TABLE {ks}.{table} (pk int PRIMARY KEY, val text);')
 
@@ -49,15 +53,17 @@ async def test_balance_empty_tablets(manager: ManagerClient):
         logger.debug(f'Large node: {large_host_id}')
         logger.debug(f'Small node: {small_host_id}')
 
-        s0_log = await manager.server_open_log(servers[0].server_id)
+        s0_log = await manager.server_open_log(r0_server.server_id)
         s0_mark = await s0_log.mark()
         await s0_log.wait_for('Refreshed table load stats for all DC', from_mark=s0_mark)
 
-        await manager.api.quiesce_topology(servers[0].ip_addr)
+        await manager.api.quiesce_topology(r0_server.ip_addr)
+
+        table_ids = [str(await manager.get_table_id(ks, table)) for table in ('t1', 't2', 't3')]
 
         replicas_per_node = defaultdict(int)
         tablets_per_shard = {}
-        for row in await cql.run_async('SELECT * FROM system.tablets'):
+        for row in await cql.run_async(f"SELECT * FROM system.tablets WHERE table_id IN ({', '.join(table_ids)})"):
             if row.keyspace_name == ks:
                 table_id = row.table_id
                 for r in row.replicas:
