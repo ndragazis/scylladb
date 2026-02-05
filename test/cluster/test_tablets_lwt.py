@@ -706,6 +706,7 @@ async def test_error_message_for_timeout_due_to_write_uncertainty(manager: Manag
         '--logger-log-level', 'paxos=trace'
     ]
     servers = await manager.servers_add(3, cmdline=cmdline, auto_rack_dc="mydc")
+    await manager.disable_tablet_balancing()
     (cql, hosts) = await manager.get_ready_cql(servers)
 
     logger.info("Create a keyspace")
@@ -857,6 +858,7 @@ async def test_lwt_shutdown(manager: ManagerClient):
         {'dc': 'my_dc', 'rack': 'r1'},
         {'dc': 'my_dc', 'rack': 'r2'}
     ])
+    await manager.disable_tablet_balancing()
     (cql, [h0, _]) = await manager.get_ready_cql([s0, s1])
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 2} AND tablets = {'initial': 1}") as ks:
         await cql.run_async(f"CREATE TABLE {ks}.test (pk int PRIMARY KEY, v int)")
