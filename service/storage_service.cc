@@ -4035,16 +4035,6 @@ future<> storage_service::decommission() {
             if (ss.raft_topology_change_enabled()) {
                 ss.raft_decommission().get();
             } else {
-                // Gossip-based decommission doesn't handle tablets - it only streams vnode ranges.
-                // Reject the operation if any tablets exist to prevent orphaned tablet replicas.
-                if (auto tablets_keyspaces = ss._db.local().get_tablets_keyspaces(); !tablets_keyspaces.empty()) {
-                    std::ranges::sort(tablets_keyspaces);
-                    throw std::runtime_error(::format(
-                        "decommission: Rejected because tablets exist in keyspaces {} but gossip-based "
-                        "decommission does not support tablets. To proceed, either drop these keyspaces "
-                        "or wait for raft topology to be restored before running decommission.",
-                        tablets_keyspaces));
-                }
                 bool left_token_ring = false;
                 auto uuid = node_ops_id::create_random_id();
                 auto& db = ss._db.local();
@@ -4452,16 +4442,6 @@ future<> storage_service::removenode(locator::host_id host_id, locator::host_id_
             if (ss.raft_topology_change_enabled()) {
                 ss.raft_removenode(host_id, std::move(ignore_nodes_params)).get();
                 return;
-            }
-            // Gossip-based removenode doesn't handle tablets - it only streams vnode ranges.
-            // Reject the operation if any tablets exist to prevent orphaned tablet replicas.
-            if (auto tablets_keyspaces = ss._db.local().get_tablets_keyspaces(); !tablets_keyspaces.empty()) {
-                std::ranges::sort(tablets_keyspaces);
-                throw std::runtime_error(::format(
-                    "removenode: Rejected because tablets exist in keyspaces {} but gossip-based "
-                    "removenode does not support tablets. To proceed, either drop these keyspaces "
-                    "or wait for raft topology to be restored before running removenode.",
-                    tablets_keyspaces));
             }
             node_ops_ctl ctl(ss, node_ops_cmd::removenode_prepare, host_id, gms::inet_address());
             auto stop_ctl = deferred_stop(ctl);
