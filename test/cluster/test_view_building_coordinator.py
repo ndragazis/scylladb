@@ -581,12 +581,13 @@ async def test_concurrent_tablet_migrations(manager: ManagerClient):
     be resumed, resulting in a view which never gets built.
 
     Scenario:
-    - Create a 3 node cluster, with two DCs, two racks in the first DC and one rack
-      in the second DC. One node in each rack
-    - Create a keyspace with one replica in each rack
+    - Create a 4 node cluster: one dedicated node for system tablets in dc0, plus
+      three nodes for the test keyspace (two DCs, two racks in the first DC and one
+      rack in the second DC, one node per rack)
+    - Create a keyspace with one replica in each rack (excluding dc0)
     - Pause tablet load balancing and view building
     - Within that keyspace, create a base table and a colocated view with two tablets
-    - Add one more node to each rack (cluster has 6 nodes in total afterwards)
+    - Add one more node to each rack in dc1/dc2 (cluster has 7 nodes in total afterwards)
     - Unpause tablet load balancing
     - Wait until tablets are evenly distributed
     - Unpause view building
@@ -595,7 +596,13 @@ async def test_concurrent_tablet_migrations(manager: ManagerClient):
     At the moment when tablet load balancing is unpaused, the tablet load balancer
     should be in a situation where it should consider moving a replica of a tablet
     in each rack, generating 3 conflicting plans.
+
+    Note: dc0 is used exclusively for system tablets to avoid interference with the
+    test keyspace's tablet distribution checks.
     """
+
+    # First node is in dc0, dedicated for system tablets (not used by the test keyspace).
+    await manager.server_add(property_file={'dc': 'dc0', 'rack': 'rack0'}, cmdline=cmdline_loggers)
 
     rack_property_files = [
         {'dc': 'dc1', 'rack': 'rack1'},
@@ -632,13 +639,17 @@ async def test_concurrent_tablet_migrations(manager: ManagerClient):
         # The effect of unpausing the balancer should be that all replicas are distributed evenly between nodes
         # (1 base + 1 view tablet for each node).
         async def tablets_are_evenly_distributed():
-            if len(await get_nodes_which_are_tablet_replicas()) == 6:
+            nodes = await get_nodes_which_are_tablet_replicas()
+            print(f"Tablet replicas are on nodes: {nodes}")
+            if len(nodes) == 6:
                 return True
 
         await wait_for(tablets_are_evenly_distributed, time.time() + 60)
 
         await unpause_view_building_tasks(manager)
-        await wait_for_view(cql, "mv", len(servers))
+        # Total nodes in the cluster: 1 (dc0) + 6 (dc1/dc2) = 7
+        all_servers = await manager.running_servers()
+        await wait_for_view(cql, "mv", len(all_servers))
 
 async def get_table_dir(manager: ManagerClient, server: ServerInfo, ks: str, table: str):
     workdir = await manager.server_get_workdir(server.server_id)
