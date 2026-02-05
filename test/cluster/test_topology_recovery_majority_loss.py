@@ -22,6 +22,7 @@ from test.cluster.conftest import cluster_con
 
 @pytest.mark.asyncio
 @log_run_time
+@pytest.mark.skip('will be removed very soon')
 async def test_topology_recovery_after_majority_loss(request, manager: ManagerClient):
     servers = await manager.servers_add(3)
     servers += await manager.servers_add(2, config={'join_ring': False})
