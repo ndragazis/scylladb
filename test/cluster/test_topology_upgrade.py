@@ -17,6 +17,7 @@ from test.cluster.util import log_run_time, wait_until_last_generation_is_in_use
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip('will be removed by #28514')
 @log_run_time
 async def test_topology_upgrade_basic(request, build_mode: str, manager: ManagerClient):
     # First, force the first node to start in legacy mode

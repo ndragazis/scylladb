@@ -28,8 +28,7 @@ async def wait_for_log_on_any_node(logs: List[ScyllaLogFile], marks: List[int], 
     await wait_for_first_completed([l.wait_for(pattern) for l, m in zip(logs, marks)])
 
 @pytest.mark.asyncio
-@pytest.mark.skip_mode(mode='release', reason='error injections are not supported in release mode')
-@pytest.mark.skip_mode(mode='debug', reason='test performs many topology changes')
+@pytest.mark.skip('will be removed by #28514')
 @log_run_time
 async def test_topology_upgrade_stuck(request, manager: ManagerClient):
     """
