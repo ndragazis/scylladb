@@ -997,26 +997,6 @@ private:
         }
         return streaming_infos;
     }
-
-    // Check if balancing is enabled for the given table.
-    // Returns false if the table belongs to an internal keyspace and
-    // tablet_balancing_for_system_keyspaces config option is disabled.
-    bool is_balancing_enabled_for_table(table_id table) const {
-        if (_db.get_config().tablet_balancing_for_system_keyspaces()) {
-            return true;
-        }
-        try {
-            auto s = _db.find_schema(table);
-            if (is_internal_keyspace(s->ks_name())) {
-                lblogger.trace("Skipping balancing for table {} in internal keyspace {}", table, s->ks_name());
-                return false;
-            }
-        } catch (...) {
-            // Table may have been dropped, skip it
-            return false;
-        }
-        return true;
-    }
 public:
     load_balancer(replica::database& db, token_metadata_ptr tm,
             service::topology* topology,
@@ -3729,10 +3709,6 @@ public:
             uint64_t total_tablet_count = 0;
             uint64_t total_tablet_sizes = 0;
 
-            // Check if balancing is enabled for this table.
-            // If disabled (e.g., for internal keyspaces), we still count the load but skip adding candidates.
-            bool balancing_enabled = is_balancing_enabled_for_table(table);
-
             auto get_replicas = [this] (std::optional<tablet_desc> t) -> tablet_replica_set {
                 return t ? sorted_replicas_for_tablet_load(*t->info, t->transition) : tablet_replica_set{};
             };
@@ -3813,10 +3789,8 @@ public:
                         // Exclude both sibling tablets if either haven't finished migration yet. That's to prevent balancer from
                         // un-doing the colocation.
                         if (!migrating(t1) && !migrating(t2)) {
-                            if (balancing_enabled) {
-                                auto candidate = colocated_tablets{global_tablet_id{table, t1.tid}, global_tablet_id{table, t2->tid}};
-                                add_candidate(shard_load_info, migration_tablet_set{std::move(candidate), tablet_sizes_sum});
-                            }
+                            auto candidate = colocated_tablets{global_tablet_id{table, t1.tid}, global_tablet_id{table, t2->tid}};
+                            add_candidate(shard_load_info, migration_tablet_set{std::move(candidate), tablet_sizes_sum});
                         } else {
                             _migrating_candidates++;
                         }
@@ -3826,9 +3800,7 @@ public:
                         }
                         for (size_t i = 0; i < tids.size(); i++) {
                             if (!migrating(get_table_desc(tids[i]))) { // migrating tablets are not candidates
-                                if (balancing_enabled) {
-                                    add_candidate(shard_load_info, migration_tablet_set{global_tablet_id{table, tids[i]}, tablet_sizes[i]});
-                                }
+                                add_candidate(shard_load_info, migration_tablet_set{global_tablet_id{table, tids[i]}, tablet_sizes[i]});
                             } else {
                                 _migrating_candidates++;
                             }
