@@ -221,11 +221,7 @@ future<> trace_keyspace_helper::start(cql3::query_processor& qp, service::migrat
     if (qp.db().features().tablets) {
         initial_tablets.emplace(0);
         auto& options = per_table_tablet_options.emplace();
-        if (qp.db().get_config().system_keyspaces_no_tablet_splits()) {
-            options.min_tablet_count = 1;
-        } else {
-            options.min_per_shard_tablet_count = 1;
-        }
+        options.min_per_shard_tablet_count = 1;
         rf = "1"; // start with RF=1 if tablets are enabled, let topology coordinator automatically adjust it
     }
 
