@@ -9,6 +9,7 @@ extra_scylla_config_options:
     rf_rack_valid_keyspaces: True
     tablets_mode_for_new_keyspaces: enabled
     auto_adjust_replication_for_tablet_based_system_keyspaces: False
+    system_keyspaces_no_tablet_splits: True
 run_first:
   - test_group0_schema_versioning
   - test_tablets_migration

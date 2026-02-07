@@ -115,7 +115,11 @@ future<> audit_cf_storage_helper::start(const db::config &cfg) {
             if (_qp.db().features().tablets) {
                 initial_tablets.emplace(0);
                 auto& options = per_table_tablet_options.emplace();
-                options.min_per_shard_tablet_count = 1;
+                if (_qp.db().get_config().system_keyspaces_no_tablet_splits()) {
+                    options.min_per_shard_tablet_count = 0.1;
+                } else {
+                    options.min_per_shard_tablet_count = 1;
+                }
                 rf = "1"; // start with RF=1 if tablets are enabled, let topology coordinator automatically adjust it
             }
             co_return co_await table_helper::setup_keyspace(_qp, _mm, KEYSPACE_NAME,
