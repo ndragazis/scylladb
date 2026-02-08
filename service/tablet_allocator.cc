@@ -925,6 +925,8 @@ class load_balancer {
 
     // When true, skip all tablet balancing (migrations, splits, merges) for internal keyspaces.
     bool _skip_system_keyspace_balancing = false;
+    // Set to true while in drain mode (nodes_to_drain non-empty) so system keyspaces are still drained.
+    bool _drain_mode = false;
 
     // The minimal tablet size the balancer will compute load with. For any tablet smaller than this,
     // the balancer will use this size instead of the actual tablet size.
@@ -932,14 +934,14 @@ class load_balancer {
 
 private:
     bool skip_balancing_for(table_id table) const {
-        if (!_skip_system_keyspace_balancing) {
+        if (!_skip_system_keyspace_balancing || _drain_mode) {
             return false;
         }
         auto t = _db.get_tables_metadata().get_table_if_exists(table);
         return t && is_internal_keyspace(t->schema()->ks_name());
     }
     bool skip_balancing_for(schema_ptr table) const {
-        return _skip_system_keyspace_balancing && is_internal_keyspace(table->ks_name());
+        return _skip_system_keyspace_balancing && !_drain_mode && is_internal_keyspace(table->ks_name());
     }
 
     tablet_replica_set get_replicas_for_tablet_load(const tablet_info& ti, const tablet_transition_info* trinfo) const {
@@ -3592,6 +3594,10 @@ public:
                 }
             }
         }
+
+        // Enable drain mode so system keyspaces are still processed when draining nodes.
+        auto drain_mode_guard = seastar::defer([this, prev = _drain_mode] { _drain_mode = prev; });
+        _drain_mode = !nodes_to_drain.empty();
 
         // Compute tablet load on nodes.
 
