@@ -923,11 +923,25 @@ class load_balancer {
     // have the same size: _target_tablet_size
     bool _force_capacity_based_balancing = false;
 
+    // When true, skip all tablet balancing (migrations, splits, merges) for internal keyspaces.
+    bool _skip_system_keyspace_balancing = false;
+
     // The minimal tablet size the balancer will compute load with. For any tablet smaller than this,
     // the balancer will use this size instead of the actual tablet size.
     uint64_t _minimal_tablet_size = service::default_target_tablet_size / 100;
 
 private:
+    bool skip_balancing_for(table_id table) const {
+        if (!_skip_system_keyspace_balancing) {
+            return false;
+        }
+        auto t = _db.get_tables_metadata().get_table_if_exists(table);
+        return t && is_internal_keyspace(t->schema()->ks_name());
+    }
+    bool skip_balancing_for(schema_ptr table) const {
+        return _skip_system_keyspace_balancing && is_internal_keyspace(table->ks_name());
+    }
+
     tablet_replica_set get_replicas_for_tablet_load(const tablet_info& ti, const tablet_transition_info* trinfo) const {
         // We reflect migrations in the load as if they already happened,
         // optimistically assuming that they will succeed.
@@ -1017,6 +1031,7 @@ public:
         , _skiplist(std::move(skiplist))
         , _size_based_balance_threshold(db.get_config().size_based_balance_threshold_percentage() / 100.0)
         , _force_capacity_based_balancing(db.get_config().force_capacity_based_balancing())
+        , _skip_system_keyspace_balancing(db.get_config().system_keyspaces_no_tablet_balancing())
         , _minimal_tablet_size(db.get_config().minimal_tablet_size_for_balancing()) {
 
         // Force capacity based balancing until all the nodes have been upgraded
@@ -1161,6 +1176,9 @@ public:
     future<> consider_scheduled_load(node_load_map& nodes) {
         const locator::topology& topo = _tm->get_topology();
         for (auto&& [table, tables] : _tm->tablets().all_table_groups()) {
+            if (skip_balancing_for(table)) {
+                continue;
+            }
             const auto& tmap = _tm->tablets().get_tablet_map(table);
             for (auto&& [tid, trinfo]: tmap.transitions()) {
                 co_await coroutine::maybe_yield();
@@ -1219,6 +1237,9 @@ public:
         utils::chunked_vector<repair_plan> plans;
         auto migration_tablet_ids = co_await mplan.get_migration_tablet_ids();
         for (auto&& [table, tables] : _tm->tablets().all_table_groups()) {
+            if (skip_balancing_for(table)) {
+                continue;
+            }
             const auto& tmap = _tm->tablets().get_tablet_map(table);
             co_await coroutine::maybe_yield();
             auto config = tmap.get_repair_scheduler_config();
@@ -1460,6 +1481,9 @@ public:
         table_resize_plan resize_plan;
 
         for (auto&& [table, tables] : _tm->tablets().all_table_groups()) {
+            if (skip_balancing_for(table)) {
+                continue;
+            }
             const auto& tmap = _tm->tablets().get_tablet_map(table);
             if (!tmap.needs_merge()) {
                 continue;
@@ -1874,6 +1898,9 @@ public:
         };
 
         for (const auto& [table, tables] : _tm->tablets().all_table_groups()) {
+            if (skip_balancing_for(table)) {
+                continue;
+            }
             const auto& tmap = _tm->tablets().get_tablet_map(table);
             auto [s, rs] = get_schema_and_rs(table);
 
@@ -1887,7 +1914,7 @@ public:
             co_await coroutine::maybe_yield();
         }
 
-        if (new_table) {
+        if (new_table && !skip_balancing_for(new_table)) {
             process_table(new_table->id(), {new_table->id()}, new_table, new_table->tablet_options(), new_rs, 0);
         }
 
@@ -3569,6 +3596,9 @@ public:
         // Compute tablet load on nodes.
 
         for (auto&& [table, tables] : _tm->tablets().all_table_groups()) {
+            if (skip_balancing_for(table)) {
+                continue;
+            }
             const auto& tmap = _tm->tablets().get_tablet_map(table);
 
             co_await tmap.for_each_tablet([&, table = table] (tablet_id tid, const tablet_info& ti) -> future<> {
@@ -3705,6 +3735,9 @@ public:
         _disk_used_per_table.clear();
 
         for (auto&& [table, tables] : _tm->tablets().all_table_groups()) {
+            if (skip_balancing_for(table)) {
+                continue;
+            }
             const auto& tmap = _tm->tablets().get_tablet_map(table);
             uint64_t total_tablet_count = 0;
             uint64_t total_tablet_sizes = 0;

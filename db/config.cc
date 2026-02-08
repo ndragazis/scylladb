@@ -1588,6 +1588,8 @@ db::config::config(std::shared_ptr<db::extensions> exts)
         "Sets the maximum difference in percentages between the most loaded and least loaded nodes, below which the load balancer considers nodes balanced.")
     , minimal_tablet_size_for_balancing(this, "minimal_tablet_size_for_balancing", liveness::LiveUpdate, value_status::Used, service::default_target_tablet_size / 100,
         "Sets the minimal tablet size for the load balancer. For any tablet smaller than this, the balancer will use this size instead of the actual tablet size.")
+    , system_keyspaces_no_tablet_balancing(this, "system_keyspaces_no_tablet_balancing", value_status::Used, false,
+        "When true, disable tablet load balancing (migrations, splits, merges) for system keyspaces such as system_traces and audit. Intended for testing.")
     /**
     * @Group Ungrouped properties
     */
