@@ -3596,22 +3596,24 @@ public:
         }
 
         // Enable drain mode so system keyspaces are still processed when draining nodes.
+        // Set before the tablet load computation loop, but will be updated after it
+        // since the loop may discover additional nodes to drain (left nodes from replacements).
         auto drain_mode_guard = seastar::defer([this, prev = _drain_mode] { _drain_mode = prev; });
         _drain_mode = !nodes_to_drain.empty();
 
         // Compute tablet load on nodes.
 
         for (auto&& [table, tables] : _tm->tablets().all_table_groups()) {
-            if (skip_balancing_for(table)) {
-                continue;
-            }
             const auto& tmap = _tm->tablets().get_tablet_map(table);
+            bool skip_balancing = skip_balancing_for(table);
 
-            co_await tmap.for_each_tablet([&, table = table] (tablet_id tid, const tablet_info& ti) -> future<> {
+            co_await tmap.for_each_tablet([&, table = table, skip_balancing] (tablet_id tid, const tablet_info& ti) -> future<> {
                 auto trinfo = tmap.get_tablet_transition_info(tid);
 
                 // Check if any replica is on a node which has left.
                 // When node is replaced we don't rebuild as part of topology request.
+                // This check must run for all tables, including system keyspaces,
+                // to ensure tablets on left nodes are always drained.
                 for (auto&& r : ti.replicas) {
                     auto* node = topo.find_node(r.host);
                     if (!node) {
@@ -3622,7 +3624,18 @@ public:
                         ensure_node(nodes, r.host);
                         nodes_to_drain.insert(r.host);
                         nodes[r.host].drained = true;
+                        // Count this tablet on the drained node even if balancing is
+                        // skipped for this table. The tablet_count is used by the
+                        // "detect finished drain" check below — without it, a node
+                        // with only system keyspace tablets would appear already
+                        // drained (tablet_count == 0) and its tablets would never
+                        // be migrated.
+                        nodes[r.host].tablet_count += 1;
                     }
+                }
+
+                if (skip_balancing) {
+                    return make_ready_future<>();
                 }
 
                 // We reflect migrations in the load as if they already happened,
@@ -3641,6 +3654,10 @@ public:
                 return make_ready_future<>();
             });
         }
+
+        // Update drain mode: the loop above may have discovered additional nodes to drain
+        // (e.g. left nodes from replacement operations whose tablets still reference them).
+        _drain_mode = !nodes_to_drain.empty();
 
         if (nodes.empty()) {
             lblogger.debug("No nodes to balance.");
