@@ -58,6 +58,11 @@ async def test_cannot_add_new_node(manager: ManagerClient, raft_op_timeout: int)
     logger.info("starting other three nodes")
     servers += await manager.servers_add(servers_num=3)
 
+    # Load balancing of system tablets causes flakiness - the following `server_add` can get stuck after quorum loss.
+    # It's not obvious why (it gets stuck on a read barrier).
+    # Disable load balancing.
+    await manager.disable_tablet_balancing()
+
     logger.info("stopping the last three nodes")
     await asyncio.gather(manager.server_stop_gracefully(servers[2].server_id),
                          manager.server_stop_gracefully(servers[3].server_id),
