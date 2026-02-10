@@ -31,6 +31,12 @@ async def test_banned_node_notification(manager: ManagerClient) -> None:
     srvs = await manager.servers_add(3, config=config)
     cql = manager.get_cql()
 
+    # The cluster has three nodes, all on the same rack, so the load balancer
+    # may decide to migrate system tablets. If a migration is in progress
+    # while pausing the node, removenode will never run and the test will hang.
+    # To prevent this, disable tablet balancing.
+    await manager.disable_tablet_balancing()
+
     # Pause one of the servers so other nodes mark it as dead and we can remove it.
     # We deliberately don't shut it down, but only pause it - we want to test
     # that we solved the harder problem of safely removing nodes which didn't shut down.
