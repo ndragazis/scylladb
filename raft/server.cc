@@ -437,10 +437,12 @@ future<> server_impl::wait_for_next_tick(seastar::abort_source* as) {
 
 future<> server_impl::wait_for_leader(seastar::abort_source* as) {
     if (_fsm->current_leader()) {
+        logger.info("[{}] wait_for_leader: leader already known: {}", _id, _fsm->current_leader());
         co_return;
     }
 
-    logger.trace("[{}] the leader is unknown, waiting through uncertainty", id());
+    logger.info("[{}] wait_for_leader: leader unknown, waiting on _leader_promise, has_as={}, as_aborted={}",
+        _id, as != nullptr, as ? as->abort_requested() : false);
     _fsm->ping_leader();
     if (!_leader_promise) {
         _leader_promise.emplace();
@@ -448,7 +450,10 @@ future<> server_impl::wait_for_leader(seastar::abort_source* as) {
 
     try {
         co_await (as ? _leader_promise->get_shared_future(*as) : _leader_promise->get_shared_future());
+        logger.info("[{}] wait_for_leader: _leader_promise resolved, leader={}", _id,
+            _fsm->current_leader() ? _fsm->current_leader().to_sstring() : "unknown");
     } catch (abort_requested_exception&) {
+        logger.info("[{}] wait_for_leader: aborted, as_aborted={}", _id, as ? as->abort_requested() : false);
         throw request_aborted(format("Aborted while waiting for leader on server: {}, latest applied entry: {}", _id, _applied_idx));
     }
 }
@@ -711,6 +716,9 @@ future<> server_impl::do_on_leader_with_retries(seastar::abort_source* as, Async
     auto gh = _do_on_leader_gate.hold();
 
     while (true) {
+        logger.info("[{}] do_on_leader_with_retries: loop iteration, leader={}, prev_leader={}, as_aborted={}",
+            _id, leader ? leader.to_sstring() : "unknown", prev_leader ? prev_leader.to_sstring() : "unknown",
+            as ? as->abort_requested() : false);
         if (as && as->abort_requested()) {
             throw request_aborted(format("Request aborted while performing action on leader, current leader: {}, previous leader: {}",
                                          leader ? leader.to_sstring() : "unknown",
@@ -718,8 +726,10 @@ future<> server_impl::do_on_leader_with_retries(seastar::abort_source* as, Async
         }
         check_not_aborted();
         if (leader == server_id{}) {
+            logger.info("[{}] do_on_leader_with_retries: leader unknown, entering wait_for_leader, has_as={}", _id, as != nullptr);
             co_await wait_for_leader(as);
             leader = _fsm->current_leader();
+            logger.info("[{}] do_on_leader_with_retries: wait_for_leader returned, leader={}", _id, leader ? leader.to_sstring() : "unknown");
             continue;
         }
         if (prev_leader && leader == prev_leader) {
@@ -1487,16 +1497,20 @@ future<> server_impl::wait_for_apply(index_t idx, abort_source* as) {
 future<read_barrier_reply> server_impl::execute_read_barrier(server_id from, seastar::abort_source* as) {
     check_not_aborted();
 
-    logger.trace("[{}] execute_read_barrier start", _id);
+    logger.info("[{}] execute_read_barrier start, from={}, has_as={}, as_aborted={}", _id, from,
+        as != nullptr, as ? as->abort_requested() : false);
 
     std::optional<std::pair<read_id, index_t>> rid;
     try {
         rid = _fsm->start_read_barrier(from);
         if (!rid) {
             // cannot start a barrier yet
+            logger.info("[{}] execute_read_barrier: leader not ready yet", _id);
             return make_ready_future<read_barrier_reply>(std::monostate{});
         }
     } catch (not_a_leader& err) {
+        logger.info("[{}] execute_read_barrier: not_a_leader, leader={}", _id,
+            err.leader ? err.leader.to_sstring() : "unknown");
         return make_ready_future<read_barrier_reply>(err);
     }
     logger.trace("[{}] execute_read_barrier read id is {} for commit idx {}",
@@ -1527,16 +1541,20 @@ future<read_barrier_reply> server_impl::get_read_idx(server_id leader, seastar::
 }
 
 future<> server_impl::read_barrier(seastar::abort_source* as) {
-    logger.trace("[{}] read_barrier start", _id);
+    logger.info("[{}] read_barrier start, current_leader={}, as_aborted={}", _id,
+        _fsm->current_leader() ? _fsm->current_leader().to_sstring() : "unknown",
+        as ? as->abort_requested() : false);
     index_t read_idx;
 
     co_await do_on_leader_with_retries(as, [&](server_id& leader) -> future<stop_iteration> {
         auto applied = _applied_idx;
         read_barrier_reply res;
         try {
+            logger.info("[{}] read_barrier: calling get_read_idx with leader={}", _id, leader);
             res = co_await get_read_idx(leader, as);
+            logger.info("[{}] read_barrier: get_read_idx returned", _id);
         } catch (const transport_error& e) {
-            logger.trace("[{}] read_barrier on {} resulted in {}; retrying", _id, leader, e);
+            logger.info("[{}] read_barrier on {} resulted in {}; retrying", _id, leader, e);
             leader = server_id{};
             co_return stop_iteration::no;
         }
@@ -1544,12 +1562,14 @@ future<> server_impl::read_barrier(seastar::abort_source* as) {
             // the leader is not ready to answer because it did not
             // committed any entries yet, so wait for any entry to be
             // committed (if non were since start of the attempt) and retry.
-            logger.trace("[{}] read_barrier leader not ready", _id);
+            logger.info("[{}] read_barrier leader not ready", _id);
             co_await wait_for_apply(++applied, as);
             co_return stop_iteration::no;
         }
         if (std::holds_alternative<raft::not_a_leader>(res)) {
             leader = std::get<not_a_leader>(res).leader;
+            logger.info("[{}] read_barrier: got not_a_leader, new leader={}", _id,
+                leader ? leader.to_sstring() : "unknown");
             co_return stop_iteration::no;
         }
         read_idx = std::get<index_t>(res);

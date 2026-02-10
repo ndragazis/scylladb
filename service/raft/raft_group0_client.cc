@@ -279,13 +279,16 @@ future<group0_guard> raft_group0_client::start_operation(seastar::abort_source& 
             }
             [[fallthrough]];
         case group0_upgrade_state::use_post_raft_procedures: {
+            logger.info("start_operation: acquiring operation mutex");
             auto operation_holder = co_await get_units(_operation_mutex, 1, as);
+            logger.info("start_operation: operation mutex acquired, starting read_barrier");
             co_await _raft_gr.group0_with_timeouts().read_barrier(&as, timeout);
+            logger.info("start_operation: read_barrier completed, acquiring read_apply mutex");
 
             // Take `_group0_read_apply_mutex` *after* read barrier.
             // Read barrier may wait for `group0_state_machine::apply` which also takes this mutex.
             auto read_apply_holder = co_await hold_read_apply_mutex(as);
-
+            logger.info("start_operation: read_apply mutex acquired");
             auto observed_group0_state_id = co_await get_last_group0_state_id();
             auto new_group0_state_id = generate_group0_state_id(observed_group0_state_id);
 

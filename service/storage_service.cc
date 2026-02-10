@@ -7634,7 +7634,9 @@ future<join_node_request_result> storage_service::join_node_request_handler(join
     }
 
     while (true) {
+        rtlogger.info("join_node_request_handler: starting start_operation for {}", params.host_id);
         auto guard = co_await _group0->client().start_operation(_group0_as, raft_timeout{});
+        rtlogger.info("join_node_request_handler: start_operation completed for {}", params.host_id);
 
         if (const auto *p = _topology_state_machine._topology.find(params.host_id)) {
             const auto& rs = p->second;
@@ -7712,8 +7714,10 @@ future<join_node_request_result> storage_service::join_node_request_handler(join
 
         co_await utils::get_local_injector().inject("join-node-before-add-entry", utils::wait_for_message(5min));
 
+        rtlogger.info("join_node_request_handler: starting add_entry for {}", params.host_id);
         try {
             co_await _group0->client().add_entry(std::move(g0_cmd), std::move(guard), _group0_as, raft_timeout{});
+            rtlogger.info("join_node_request_handler: add_entry completed for {}", params.host_id);
             break;
         } catch (group0_concurrent_modification&) {
             rtlogger.info("join_node_request: concurrent operation is detected, retrying.");

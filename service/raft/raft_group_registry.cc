@@ -436,6 +436,7 @@ raft_server_with_timeouts::run_with_timeout(Op&& op, const char* op_name,
     seastar::abort_source* as, std::optional<raft_timeout> timeout)
 {
     if (!timeout) {
+        rslog.info("run_with_timeout [{}]: no timeout, calling op directly", op_name);
         co_return co_await op(as);
     }
     if (!timeout->value) {
@@ -446,6 +447,8 @@ raft_server_with_timeouts::run_with_timeout(Op&& op, const char* op_name,
         }
         timeout->value = lowres_clock::now() + std::chrono::milliseconds(_group_server.default_op_timeout_in_ms->get());
     }
+    auto timeout_duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(*timeout->value - lowres_clock::now()).count();
+    rslog.info("run_with_timeout [{}]: arming abort_on_expiry timer, timeout in {}ms", op_name, timeout_duration_ms);
     utils::composite_abort_source composite_as;
 
     abort_on_expiry<> expiry{*timeout->value};
@@ -458,6 +461,8 @@ raft_server_with_timeouts::run_with_timeout(Op&& op, const char* op_name,
     try {
         co_return co_await op(&composite_as.abort_source());
     } catch (const raft::request_aborted& e) {
+        rslog.info("run_with_timeout [{}]: caught request_aborted, expiry_aborted={}, as_aborted={}",
+            op_name, expiry.abort_source().abort_requested(), as ? as->abort_requested() : false);
         if (!expiry.abort_source().abort_requested() || (as && as->abort_requested())) {
             throw;
         }
@@ -520,10 +525,24 @@ future<bool> raft_server_with_timeouts::trigger_snapshot(seastar::abort_source* 
 
 future<> raft_server_with_timeouts::read_barrier(seastar::abort_source* as, std::optional<raft_timeout> timeout)
 {
-    return run_with_timeout([&](abort_source* as) -> future<> {
-        co_await utils::get_local_injector().inject("sleep_in_read_barrier", std::chrono::seconds(1));
-        co_return co_await _group_server.server->read_barrier(as);
-    }, "read_barrier", as, timeout);
+    auto timeout_ms = _group_server.default_op_timeout_in_ms
+        ? std::optional<uint32_t>(_group_server.default_op_timeout_in_ms->get())
+        : std::nullopt;
+    rslog.info("read_barrier: entering run_with_timeout, has_timeout={}, timeout_value={}, default_op_timeout_in_ms={}, as_aborted={}",
+        timeout.has_value(),
+        timeout && timeout->value ? fmt::format("{}ms", std::chrono::duration_cast<std::chrono::milliseconds>(timeout->value->time_since_epoch()).count()) : "none",
+        timeout_ms ? fmt::format("{}ms", *timeout_ms) : "none",
+        as ? as->abort_requested() : false);
+    try {
+        co_await run_with_timeout([&](abort_source* as) -> future<> {
+            co_await utils::get_local_injector().inject("sleep_in_read_barrier", std::chrono::seconds(1));
+            co_return co_await _group_server.server->read_barrier(as);
+        }, "read_barrier", as, timeout);
+        rslog.info("read_barrier: run_with_timeout completed successfully");
+    } catch (...) {
+        rslog.info("read_barrier: run_with_timeout threw: {}", std::current_exception());
+        throw;
+    }
 }
 
 future<bool> direct_fd_pinger::ping(direct_failure_detector::pinger::endpoint_id id, direct_failure_detector::clock::timepoint_t timeout, abort_source& as, direct_failure_detector::clock& c) {
