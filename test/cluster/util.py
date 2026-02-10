@@ -579,8 +579,18 @@ async def new_test_keyspace(manager: ManagerClient, opts, host=None):
     A utility function for creating a new temporary keyspace with given
     options. It can be used in a "async with", as:
         async with new_test_keyspace(ManagerClient, '...') as keyspace:
+
+    If no `host` is given, the keyspace will be created on the topology coordinator
+    to prevent group0 guard conflicts.
     """
-    keyspace = await create_new_test_keyspace(manager.get_cql(), opts, host)
+    cql = manager.get_cql()
+    if host is None:
+        coordinator_host_id = await get_topology_coordinator(manager)
+        servers = await manager.running_servers()
+        coordinator_server = await find_server_by_host_id(manager, servers, coordinator_host_id)
+        host = cql.cluster.metadata.get_host(coordinator_server.ip_addr)
+
+    keyspace = await create_new_test_keyspace(cql, opts, host)
     try:
         yield keyspace
     except:
