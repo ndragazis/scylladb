@@ -34,6 +34,10 @@ async def test_tablet_mv_replica_pairing_during_replace(manager: ManagerClient):
     the pairing would be shifted during replace.
     """
 
+    # DC0 is used exclusively for system tablets to avoid interference with the
+    # test keyspace's tablet distribution checks.
+    dc0_server = await manager.server_add(property_file={"dc": "dc0", "rack": "r1"})
+
     servers = await manager.servers_add(4, property_file=[
         {"dc": "dc1", "rack": "r1"},
         {"dc": "dc1", "rack": "r1"},
@@ -41,7 +45,7 @@ async def test_tablet_mv_replica_pairing_during_replace(manager: ManagerClient):
         {"dc": "dc1", "rack": "r2"}
     ])
     cql = manager.get_cql()
-    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 2} AND tablets = {'initial': 1}") as ks:
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'dc1': 2} AND tablets = {'initial': 1}") as ks:
         await cql.run_async(f"CREATE TABLE {ks}.test (pk int PRIMARY KEY, c int)")
         await cql.run_async(f"CREATE MATERIALIZED VIEW {ks}.tv AS SELECT * FROM {ks}.test WHERE c IS NOT NULL AND pk IS NOT NULL PRIMARY KEY (c, pk) WITH SYNCHRONOUS_UPDATES = TRUE")
 
@@ -61,15 +65,15 @@ async def test_tablet_mv_replica_pairing_during_replace(manager: ManagerClient):
         logger.info(f'{ks}.test replicas: {base_replicas}')
         view_replicas = await get_tablet_replicas(manager, servers[0], ks, "tv", 0)
         logger.info(f'{ks}.tv replicas: {view_replicas}')
-        server_to_replace = await find_server_by_host_id(manager, servers, HostID(str(view_replicas[0][0])))
-        server_to_down = await find_server_by_host_id(manager, servers, HostID(str(base_replicas[0][0])))
+        server_to_replace = await find_server_by_host_id(manager, [dc0_server] + servers, HostID(str(view_replicas[0][0])))
+        server_to_down = await find_server_by_host_id(manager, [dc0_server] + servers, HostID(str(base_replicas[0][0])))
 
         logger.info('Downing a node to be replaced')
         await manager.server_stop(server_to_replace.server_id)
 
         logger.info('Blocking tablet rebuild')
         coord = await get_topology_coordinator(manager)
-        coord_serv = await find_server_by_host_id(manager, servers, coord)
+        coord_serv = await find_server_by_host_id(manager, [dc0_server] + servers, coord)
         await manager.api.enable_injection(coord_serv.ip_addr, "tablet_transition_updates", one_shot=True)
         coord_log = await manager.server_open_log(coord_serv.server_id)
         coord_mark = await coord_log.mark()
