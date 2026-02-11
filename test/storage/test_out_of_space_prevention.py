@@ -15,7 +15,7 @@ from cassandra.cluster import ConsistencyLevel
 from cassandra.query import SimpleStatement
 from typing import Callable
 
-from test.cluster.util import get_topology_coordinator, find_server_by_host_id, new_test_keyspace, new_test_table
+from test.cluster.util import get_topology_coordinator, find_server_by_host_id, new_test_keyspace, new_test_table, reconnect_driver
 from test.pylib.manager_client import ManagerClient
 from test.pylib.tablets import get_tablet_count
 from test.pylib.util import Host
@@ -140,7 +140,10 @@ async def test_autotoogle_compaction(manager: ManagerClient, volumes_factory: Ca
                         mark, _ = await log.wait_for("compaction_manager - Drained", from_mark=mark)
 
                     logger.info("Restart the node")
-                    await manager.server_restart(servers[0].server_id)
+                    await manager.server_stop_gracefully(servers[0].server_id)
+                    mark = await log.mark()
+                    await manager.server_start(servers[0].server_id)
+                    await reconnect_driver(manager)
                     for _ in range(2):
                         mark, _ = await log.wait_for("compaction_manager - Drained", from_mark=mark)
 
