@@ -554,7 +554,8 @@ future<::shared_ptr<cql_transport::messages::result_message>> query_processor::e
     }
 
     auto [remote_, holder] = remote();
-    size_t retries = remote_.get().mm.get_concurrent_ddl_retries();
+    //size_t retries = remote_.get().mm.get_concurrent_ddl_retries();
+    size_t retries = 0;
     while (true)  {
         try {
             auto guard = co_await remote_.get().mm.start_group0_operation();
