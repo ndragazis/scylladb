@@ -1381,55 +1381,54 @@ async def test_tablet_split_finalization_with_migrations(manager: ManagerClient)
     servers = await manager.servers_add(2, cmdline=cmdline, config=cfg)
 
     logger.info("Create and populate test table")
-    cql = manager.get_cql()
-    await cql.run_async("CREATE KEYSPACE test WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'initial': 4};")
-    await cql.run_async("CREATE TABLE test.test (pk int PRIMARY KEY, c int);")
-    await manager.api.disable_autocompaction(servers[0].ip_addr, "test")
-    await asyncio.gather(*[cql.run_async(f"INSERT INTO test.test (pk, c) VALUES ({k}, {k%3});") for k in range(64)])
-    await manager.api.keyspace_flush(servers[0].ip_addr, "test", "test")
-    test_table_id = (await cql.run_async("SELECT id FROM system_schema.tables WHERE keyspace_name = 'test' AND table_name = 'test'"))[0].id
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'initial': 4};") as ks:
+        cql = manager.get_cql()
+        await cql.run_async(f"CREATE TABLE {ks}.test (pk int PRIMARY KEY, c int);")
+        await manager.api.disable_autocompaction(servers[0].ip_addr, ks)
+        await asyncio.gather(*[cql.run_async(f"INSERT INTO {ks}.test (pk, c) VALUES ({k}, {k%3});") for k in range(64)])
+        await manager.api.keyspace_flush(servers[0].ip_addr, ks, "test")
+        test_table_id = (await cql.run_async(f"SELECT id FROM system_schema.tables WHERE keyspace_name = '{ks}' AND table_name = 'test'"))[0].id
+        logger.info("Trigger split in table")
+        await cql.run_async(f"ALTER TABLE {ks}.test WITH tablets = {{'min_tablet_count': 8}};")
 
-    logger.info("Trigger split in table")
-    await cql.run_async("ALTER TABLE test.test WITH tablets = {'min_tablet_count': 8};")
+        # Wait for splits to finalise; they don't execute yet as they are prevented by the error injection
+        logger.info("Wait for tablets to split")
+        log = await manager.server_open_log(servers[0].server_id)
+        await log.wait_for(f"Finalizing resize decision for table {test_table_id} as all replicas agree on sequence number 1")
 
-    # Wait for splits to finalise; they don't execute yet as they are prevented by the error injection
-    logger.info("Wait for tablets to split")
-    log = await manager.server_open_log(servers[0].server_id)
-    await log.wait_for(f"Finalizing resize decision for table {test_table_id} as all replicas agree on sequence number 1")
+        logger.info("Create and populate `blocker` table")
+        await cql.run_async(f"CREATE TABLE {ks}.blocker (pk int PRIMARY KEY, c int);")
+        await asyncio.gather(*[cql.run_async(f"INSERT INTO {ks}.blocker (pk, c) VALUES ({k}, {k%3});") for k in range(128)])
+        await manager.api.keyspace_flush(servers[0].ip_addr, ks, "blocker")
+        blocker_table_id = (await cql.run_async(f"SELECT id FROM system_schema.tables WHERE keyspace_name = '{ks}' AND table_name = 'blocker'"))[0].id
 
-    logger.info("Create and populate `blocker` table")
-    await cql.run_async("CREATE TABLE test.blocker (pk int PRIMARY KEY, c int);")
-    await asyncio.gather(*[cql.run_async(f"INSERT INTO test.blocker (pk, c) VALUES ({k}, {k%3});") for k in range(128)])
-    await manager.api.keyspace_flush(servers[0].ip_addr, "test", "blocker")
-    blocker_table_id = (await cql.run_async("SELECT id FROM system_schema.tables WHERE keyspace_name = 'test' AND table_name = 'blocker'"))[0].id
+        s0_host_id = await manager.get_host_id(servers[0].server_id)
+        for cf in ["test", "blocker"]:
+            logger.info(f"Move all tablets of {ks}.{cf} from Node 2 to Node 1")
+            await manager.disable_tablet_balancing()
+            s1_replicas = await get_all_tablet_replicas(manager, servers[1], ks, cf)
+            migration_tasks = [
+                manager.api.move_tablet(servers[0].ip_addr, ks, cf,
+                                        tablet.replicas[0][0], tablet.replicas[0][1],
+                                        s0_host_id, 0, tablet.last_token)
+                for tablet in s1_replicas
+            ]
+            await asyncio.gather(*migration_tasks)
 
-    s0_host_id = await manager.get_host_id(servers[0].server_id)
-    for cf in ["test", "blocker"]:
-        logger.info(f"Move all tablets of test.{cf} from Node 2 to Node 1")
-        await manager.disable_tablet_balancing()
-        s1_replicas = await get_all_tablet_replicas(manager, servers[1], "test", cf)
-        migration_tasks = [
-            manager.api.move_tablet(servers[0].ip_addr, "test", cf,
-                                    tablet.replicas[0][0], tablet.replicas[0][1],
-                                    s0_host_id, 0, tablet.last_token)
-            for tablet in s1_replicas
-        ]
-        await asyncio.gather(*migration_tasks)
+        logger.info("Re-enable tablet balancing; it should be blocked by pending split finalization")
+        await manager.enable_tablet_balancing()
+        mark, _ = await log.wait_for("Setting tablet balancing to true")
 
-    logger.info("Re-enable tablet balancing; it should be blocked by pending split finalization")
-    await manager.enable_tablet_balancing()
-    mark, _ = await log.wait_for("Setting tablet balancing to true")
+        logger.info("Unblock resize finalisation and verify that the finalisation is preferred over migrations")
+        await manager.api.disable_injection(servers[0].ip_addr, "tablet_split_finalization_postpone")
+        split_finalization_mark, _ = await log.wait_for("Finished tablet resize finalization", from_mark=mark)
+        for table_id in [test_table_id, blocker_table_id]:
+            migration_mark, _ = await log.wait_for(f"Will set tablet {table_id}:\\d+ stage to write_both_read_old", from_mark=mark)
+            assert split_finalization_mark < migration_mark, f"Tablet migration of {table_id} was scheduled before resize finalization"
 
-    logger.info("Unblock resize finalisation and verify that the finalisation is preferred over migrations")
-    await manager.api.disable_injection(servers[0].ip_addr, "tablet_split_finalization_postpone")
-    split_finalization_mark, _ = await log.wait_for("Finished tablet resize finalization", from_mark=mark)
-    for table_id in [test_table_id, blocker_table_id]:
-        migration_mark, _ = await log.wait_for(f"Will set tablet {table_id}:\\d+ stage to write_both_read_old", from_mark=mark)
-        assert split_finalization_mark < migration_mark, f"Tablet migration of {table_id} was scheduled before resize finalization"
-
-    # ensure all migrations complete
-    logger.info("Waiting for migrations to complete")
-    await log.wait_for("Tablet load balancer did not make any plan", from_mark=migration_mark)
+        # ensure all migrations complete
+        logger.info("Waiting for migrations to complete")
+        await log.wait_for("Tablet load balancer did not make any plan", from_mark=migration_mark)
 
 @pytest.mark.asyncio
 @pytest.mark.skip_mode(mode='release', reason='error injections are not supported in release mode')
