@@ -298,6 +298,10 @@ public:
     void wake_up_topology_state_machine() noexcept;
     future<> update_tablet_metadata(const locator::tablet_metadata_change_hint& hint);
 
+    /// Migrate a vnode table to tablets.
+    /// Builds a tablet map from vnode token boundaries and persists to group0.
+    future<> maybe_migrate_table_to_tablets();
+
     void start_tablet_split_monitor();
 private:
     using acquire_merge_lock = bool_class<class acquire_merge_lock_tag>;

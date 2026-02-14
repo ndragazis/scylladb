@@ -1555,6 +1555,7 @@ db::config::config(std::shared_ptr<db::extensions> exts)
             "\tdisabled: New keyspaces use vnodes by default, unless enabled by the tablets={'enabled':true} option\n"
             "\tenabled:  New keyspaces use tablets by default, unless disabled by the tablets={'enabled':false} option\n"
             "\tenforced: New keyspaces must use tablets. Tablets cannot be disabled using the CREATE KEYSPACE option")
+    , migrate_to_tablets(this, "migrate_to_tablets", value_status::Used, "", "Migrate a vnode table to tablets. Format: 'keyspace.table'.")
     , auto_repair_enabled_default(this, "auto_repair_enabled_default", liveness::LiveUpdate, value_status::Used, false, "Set true to enable auto repair for tablet tables by default. The value will be overridden by the per keyspace or per table configuration which is not implemented yet.")
     , auto_repair_threshold_default_in_seconds(this, "auto_repair_threshold_default_in_seconds", liveness::LiveUpdate, value_status::Used, 24 * 3600 , "Set the default time in seconds for the auto repair threshold for tablet tables. If the time since last repair is bigger than the configured time, the tablet is eligible for auto repair. The value will be overridden by the per keyspace or per table configuration which is not implemented yet.")
     , view_flow_control_delay_limit_in_ms(this, "view_flow_control_delay_limit_in_ms", liveness::LiveUpdate, value_status::Used, 1000,

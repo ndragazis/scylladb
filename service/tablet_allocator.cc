@@ -1161,6 +1161,9 @@ public:
     future<> consider_scheduled_load(node_load_map& nodes) {
         const locator::topology& topo = _tm->get_topology();
         for (auto&& [table, tables] : _tm->tablets().all_table_groups()) {
+            if (is_migration_table(table)) {
+                continue;
+            }
             const auto& tmap = _tm->tablets().get_tablet_map(table);
             for (auto&& [tid, trinfo]: tmap.transitions()) {
                 co_await coroutine::maybe_yield();
@@ -1219,6 +1222,9 @@ public:
         utils::chunked_vector<repair_plan> plans;
         auto migration_tablet_ids = co_await mplan.get_migration_tablet_ids();
         for (auto&& [table, tables] : _tm->tablets().all_table_groups()) {
+            if (is_migration_table(table)) {
+                continue;
+            }
             const auto& tmap = _tm->tablets().get_tablet_map(table);
             co_await coroutine::maybe_yield();
             auto config = tmap.get_repair_scheduler_config();
@@ -1451,6 +1457,9 @@ public:
         table_resize_plan resize_plan;
 
         for (auto&& [table, tables] : _tm->tablets().all_table_groups()) {
+            if (is_migration_table(table)) {
+                continue;
+            }
             const auto& tmap = _tm->tablets().get_tablet_map(table);
             if (!tmap.needs_merge()) {
                 continue;
@@ -1675,6 +1684,18 @@ public:
         return rs;
     }
 
+    // Returns true if the table is under vnode-to-tablet migration.
+    // Such tables have a tablet map but their keyspace RS doesn't use tablets.
+    // They should be excluded from load balancing.
+    bool is_migration_table(table_id table) {
+        auto t = _db.get_tables_metadata().get_table_if_exists(table);
+        if (!t) {
+            return false;
+        }
+        auto& ks = _db.find_keyspace(t->schema()->ks_name());
+        return !ks.get_replication_strategy().uses_tablets();
+    }
+
     struct table_sizing {
         size_t current_tablet_count; // Tablet count in group0.
         size_t target_tablet_count; // Tablet count wanted by scheduler.
@@ -1865,6 +1886,9 @@ public:
         };
 
         for (const auto& [table, tables] : _tm->tablets().all_table_groups()) {
+            if (is_migration_table(table)) {
+                continue;
+            }
             const auto& tmap = _tm->tablets().get_tablet_map(table);
             auto [s, rs] = get_schema_and_rs(table);
 
@@ -3560,6 +3584,9 @@ public:
         // Compute tablet load on nodes.
 
         for (auto&& [table, tables] : _tm->tablets().all_table_groups()) {
+            if (is_migration_table(table)) {
+                continue;
+            }
             const auto& tmap = _tm->tablets().get_tablet_map(table);
 
             co_await tmap.for_each_tablet([&, table = table] (tablet_id tid, const tablet_info& ti) -> future<> {
@@ -3696,6 +3723,9 @@ public:
         _disk_used_per_table.clear();
 
         for (auto&& [table, tables] : _tm->tablets().all_table_groups()) {
+            if (is_migration_table(table)) {
+                continue;
+            }
             const auto& tmap = _tm->tablets().get_tablet_map(table);
             uint64_t total_tablet_count = 0;
             uint64_t total_tablet_sizes = 0;
