@@ -113,6 +113,30 @@
          ]
       },
       {
+         "path":"/column_family/vnodes_resharding/{name}",
+         "operations":[
+            {
+               "method":"POST",
+               "summary":"Force a vnodes-resharding compaction of this column family",
+               "type":"void",
+               "nickname":"vnodes_resharding_compaction",
+               "produces":[
+                  "application/json"
+               ],
+               "parameters":[
+                  {
+                     "name":"name",
+                     "description":"The column family name in keyspace:name format",
+                     "required":true,
+                     "allowMultiple":false,
+                     "type":"string",
+                     "paramType":"path"
+                  }
+               ]
+            }
+         ]
+      },
+      {
          "path":"/column_family/minimum_compaction/{name}",
          "operations":[
             {

@@ -500,6 +500,7 @@ template<typename Generator>
 class multi_range_mutation_reader : public mutation_reader::impl {
     std::optional<Generator> _generator;
     mutation_reader _reader;
+    bool _segregate_ranges;
 
     const dht::partition_range* next() {
         if (!_generator) {
@@ -516,10 +517,12 @@ public:
             const dht::partition_range& first_range,
             Generator generator,
             const query::partition_slice& slice,
-            tracing::trace_state_ptr trace_state)
+            tracing::trace_state_ptr trace_state,
+            bool segregate_ranges)
         : impl(s, std::move(permit))
         , _generator(std::move(generator))
         , _reader(source.make_mutation_reader(s, _permit, first_range, slice, trace_state, streamed_mutation::forwarding::no, mutation_reader::forwarding::yes))
+        , _segregate_ranges(segregate_ranges)
     {
     }
 
@@ -533,6 +536,12 @@ public:
                     return make_ready_future<>();
                 }
                 if (auto r = next()) {
+                    if (_segregate_ranges) [[unlikely]]{
+                        mrlog.warn("Segregate ranges: got {}", *r);
+                        _next_range = *r;
+                        _end_of_stream = true;
+                        return make_ready_future<>();
+                    }
                     return _reader.fast_forward_to(*r);
                 } else {
                     _end_of_stream = true;
@@ -638,7 +647,8 @@ mutation_reader
 make_multi_range_reader(schema_ptr s, reader_permit permit, mutation_source source, const dht::partition_range_vector& ranges,
                         const query::partition_slice& slice,
                         tracing::trace_state_ptr trace_state,
-                        mutation_reader::forwarding fwd_mr)
+                        mutation_reader::forwarding fwd_mr,
+                        bool segregate_ranges)
 {
     class adapter {
         dht::partition_range_vector::const_iterator _it;
@@ -666,7 +676,7 @@ make_multi_range_reader(schema_ptr s, reader_permit permit, mutation_source sour
         return source.make_mutation_reader(std::move(s), std::move(permit), ranges.front(), slice, std::move(trace_state), streamed_mutation::forwarding::no, fwd_mr);
     } else {
         return make_mutation_reader<multi_range_mutation_reader<adapter>>(std::move(s), std::move(permit), std::move(source),
-                ranges.front(), adapter(std::next(ranges.cbegin()), ranges.cend()), slice, std::move(trace_state));
+                ranges.front(), adapter(std::next(ranges.cbegin()), ranges.cend()), slice, std::move(trace_state), segregate_ranges);
     }
 }
 
@@ -678,7 +688,8 @@ make_multi_range_reader(
         std::function<std::optional<dht::partition_range>()> generator,
         const query::partition_slice& slice,
         tracing::trace_state_ptr trace_state,
-        mutation_reader::forwarding fwd_mr) {
+        mutation_reader::forwarding fwd_mr,
+        bool segregate_ranges) {
     class adapter {
         std::function<std::optional<dht::partition_range>()> _generator;
         std::unique_ptr<dht::partition_range> _previous;
@@ -711,7 +722,7 @@ make_multi_range_reader(
         }
     } else {
         return make_mutation_reader<multi_range_mutation_reader<adapter>>(std::move(s), std::move(permit), std::move(source),
-                *first_range, std::move(adapted_generator), slice, std::move(trace_state));
+                *first_range, std::move(adapted_generator), slice, std::move(trace_state), segregate_ranges);
     }
 }
 

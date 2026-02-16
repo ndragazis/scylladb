@@ -176,6 +176,8 @@ struct compaction_descriptor {
     compaction::owned_ranges_ptr owned_ranges;
     // Required for reshard compaction.
     const dht::sharder* sharder;
+    // If set, resharding compaction will apply the owned_ranges to segregate sstables in vnode boundaries.
+    bool vnodes_resharding = false;
 
     compaction_sstable_creator_fn creator;
     compaction_sstable_replacer_fn replacer;

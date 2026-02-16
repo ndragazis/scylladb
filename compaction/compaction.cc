@@ -844,7 +844,7 @@ private:
                                             _schema->full_slice(),
                                             tracing::trace_state_ptr());
     }
-
+private:
     virtual sstables::sstable_set make_sstable_set_for_input() const {
         return _table_s.get_compaction_strategy().make_sstable_set(_table_s);
     }
@@ -1929,6 +1929,7 @@ class resharding_compaction final : public compaction {
     };
     std::vector<estimated_values> _estimation_per_shard;
     std::vector<sstables::run_id> _run_identifiers;
+    bool _reshard_vnodes;
 private:
     // return estimated partitions per sstable for a given shard
     uint64_t partitions_per_sstable(shard_id s) const {
@@ -1941,7 +1942,11 @@ public:
         : compaction(table_s, std::move(descriptor), cdata, progress_monitor, use_backlog_tracker::no)
         , _estimation_per_shard(smp::count)
         , _run_identifiers(smp::count)
+        , _reshard_vnodes(descriptor.vnodes_resharding)
     {
+        if (_reshard_vnodes && !_owned_ranges) {
+            on_internal_error(clogger, "Resharding vnodes requires owned_ranges");
+        }
         for (auto& sst : _sstables) {
             const auto& shards = sst->get_shards_for_this_sstable();
             auto size = sst->bytes_on_disk();
@@ -1979,8 +1984,9 @@ public:
     }
 
     mutation_reader_consumer make_interposer_consumer(mutation_reader_consumer end_consumer) override {
-        return [end_consumer = std::move(end_consumer)] (mutation_reader reader) mutable -> future<> {
-            return mutation_writer::segregate_by_shard(std::move(reader), std::move(end_consumer));
+        auto owned_ranges = _reshard_vnodes ? _owned_ranges : nullptr;
+        return [end_consumer = std::move(end_consumer), owned_ranges = std::move(owned_ranges)] (mutation_reader reader) mutable -> future<> {
+            return mutation_writer::segregate_by_shard(std::move(reader), std::move(end_consumer), std::move(owned_ranges));
         };
     }
 

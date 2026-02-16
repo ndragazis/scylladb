@@ -40,7 +40,8 @@ make_multi_range_reader(
         schema_ptr s, reader_permit permit, mutation_source source, const dht::partition_range_vector& ranges,
         const query::partition_slice& slice,
         tracing::trace_state_ptr trace_state = nullptr,
-        mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes);
+        mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes,
+        bool segregate_ranges = false);
 
 /// Make a reader that enables the wrapped reader to work with multiple ranges.
 ///
@@ -54,4 +55,5 @@ make_multi_range_reader(
         std::function<std::optional<dht::partition_range>()> generator,
         const query::partition_slice& slice,
         tracing::trace_state_ptr trace_state = nullptr,
-        mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes);
+        mutation_reader::forwarding fwd_mr = mutation_reader::forwarding::yes,
+        bool segregate_ranges = false);

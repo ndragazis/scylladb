@@ -22,6 +22,8 @@
 #include "storage_service.hh"
 #include "compaction/compaction_manager.hh"
 #include "unimplemented.hh"
+#include "replica/distributed_loader.hh"
+#include "sstables/sstables_manager.hh"
 
 extern logging::logger apilog;
 
@@ -1068,6 +1070,41 @@ void set_column_family(http_context& ctx, routes& r, sharded<replica::database>&
             fmopt = compaction::flush_mode::skip;
         }
         auto task = co_await compaction_module.make_and_start_task<compaction::major_keyspace_compaction_task_impl>({}, std::move(keyspace), tasks::task_id::create_null_id(), db, std::move(table_infos), fmopt, consider_only_existing_data);
+        co_await task->done();
+        co_return json_void();
+    });
+
+    cf::vnodes_resharding_compaction.set(r, [&ctx, &db](std::unique_ptr<http::request> req) -> future<json::json_return_type> {
+        auto [ks_param, table_name] = parse_fully_qualified_cf_name(req->get_path_param("name"));
+        auto ks_name = validate_keyspace(ctx, ks_param);
+        auto& ks = db.local().find_keyspace(ks_name);
+        if (!ks.get_replication_strategy().is_vnode_based()) {
+            throw bad_param_exception(fmt::format("Vnodes resharding requires vnode-based keyspace: {}", ks_name));
+        }
+
+        auto global_table = co_await get_table_on_all_shards(db, ks_name, table_name);
+
+        apilog.info("column_family/vnodes_resharding_compaction: {}.{}", ks_name, table_name);
+
+        auto erm = ks.get_static_effective_replication_map();
+        auto owned_ranges_ptr = compaction::make_owned_ranges_ptr(co_await db.local().get_keyspace_local_ranges(erm));
+        sharded<sstables::sstable_directory> directory;
+        co_await directory.start(global_table.as_sharded_parameter(),
+            sstables::sstable_state::upload, &replica::error_handler_gen_for_upload_dir
+        );
+
+        auto make_sstable = [&] (shard_id shard) {
+            auto& sstm = global_table->get_sstables_manager();
+            auto& gen = global_table->get_sstable_generation_generator();
+            auto generation = gen();
+            return sstm.make_sstable(global_table->schema(), global_table->get_storage_options(),
+                                     generation, sstables::sstable_state::upload, sstm.get_preferred_sstable_version(),
+                                     sstables::sstable_format_types::big, db_clock::now(), &replica::error_handler_gen_for_upload_dir);
+        };
+
+        auto& compaction_module = db.local().get_compaction_manager().get_task_manager_module();
+        bool vnodes_resharding = true;
+        auto task = co_await compaction_module.make_and_start_task<compaction::table_resharding_compaction_task_impl>({}, std::move(ks_name), std::move(table_name), directory, db, make_sstable, std::move(owned_ranges_ptr), vnodes_resharding);
         co_await task->done();
         co_return json_void();
     });
