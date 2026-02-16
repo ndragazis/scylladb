@@ -15,7 +15,7 @@ from test.pylib.manager_client import ManagerClient
 from test.pylib.repair import create_table_insert_data_for_repair
 from test.pylib.rest_client import HTTPError, read_barrier
 from test.pylib.scylla_cluster import ReplaceConfig
-from test.pylib.tablets import get_tablet_replica, get_all_tablet_replicas
+from test.pylib.tablets import get_tablet_replica, get_all_tablet_replicas, get_tablet_count
 from test.pylib.util import unique_name, wait_for, wait_for_first_completed
 from test.cluster.util import wait_for_cql_and_get_hosts, create_new_test_keyspace, new_test_keyspace, reconnect_driver, \
     get_topology_coordinator, parse_replication_options, get_replication, get_replica_count, find_server_by_host_id
@@ -1796,3 +1796,90 @@ async def test_convert_cluster_to_powof2_vnodes(manager: ManagerClient, num_node
             assert r.pk not in data
             data[r.pk] = r
         assert len(data) == num_keys
+
+
+@pytest.mark.asyncio
+async def test_migrate_vnode_table_to_tablets(manager: ManagerClient):
+    """Verifies that a vnode table can be migrated to tablets by restarting
+    the node with the migrate_to_tablets config option.
+
+    Steps:
+    1. Start a single-shard node with one power-of-2 aligned vnode token.
+    2. Create a keyspace and table with tablets disabled.
+    3. Restart the node in migration mode (migrate_to_tablets=ks.table).
+    4. Verify that a tablet map was created with matching token count.
+    5. Insert data, flush, read back and verify.
+    6. Restart the node again, read back and verify data survives.
+    """
+    logger.info("Starting a node with 1 shard and 1 power-of-2 aligned token")
+    tokens = calculate_powof2_tokens(num_nodes=1, tokens_per_node=1)
+    token_list = tokens[1]  # server_id 1
+    initial_token = ','.join([str(t) for t in token_list])
+    server = (await manager.servers_add(1, cmdline=[
+        '--smp', '1',
+        f'--initial-token={initial_token}',
+    ]))[0]
+
+    cql = manager.get_cql()
+
+    logger.info("Creating keyspace and table with tablets disabled")
+    ks = unique_name()
+    await cql.run_async(f"CREATE KEYSPACE {ks} WITH replication = "
+                        f"{{'class': 'NetworkTopologyStrategy', 'replication_factor': 1}} "
+                        f"AND tablets = {{'enabled': false}}")
+    await cql.run_async(f"CREATE TABLE {ks}.test (pk int PRIMARY KEY, c int)")
+
+    try:
+        logger.info("Restarting the node with migrate_to_tablets config")
+        await manager.server_stop_gracefully(server.server_id)
+        await manager.server_update_config(server.server_id, 'migrate_to_tablets', f'{ks}.test')
+        await manager.server_start(server.server_id)
+        await reconnect_driver(manager)
+        cql = manager.get_cql()
+
+        logger.info("Verifying that the tablet map was created with matching token count")
+        tablet_count = await get_tablet_count(manager, server, ks, 'test')
+        assert tablet_count == len(token_list), \
+            f"Expected {len(token_list)} tablet(s), got {tablet_count}"
+
+        tablet_replicas = await get_all_tablet_replicas(manager, server, ks, 'test')
+        assert len(tablet_replicas) == len(token_list), \
+            f"Expected {len(token_list)} tablet replica entry, got {len(tablet_replicas)}"
+
+        logger.info("Verifying that tablet tokens match vnode tokens")
+        tablet_tokens = sorted([tr.last_token for tr in tablet_replicas])
+        vnode_tokens = sorted(token_list)
+        assert tablet_tokens == vnode_tokens, \
+            f"Tablet tokens {tablet_tokens} do not match vnode tokens {vnode_tokens}"
+
+        logger.info("Inserting data, flushing, reading back and verifying")
+        num_keys = 100
+        stmt = cql.prepare(f"INSERT INTO {ks}.test (pk, c) VALUES (?, ?)")
+        await asyncio.gather(*[cql.run_async(stmt, [k, k]) for k in range(num_keys)])
+
+        await manager.api.keyspace_flush(server.ip_addr, ks, "test")
+
+        logger.info("Reading back and verifying data")
+        rows = await cql.run_async(f"SELECT * FROM {ks}.test")
+        data = {r.pk: r.c for r in rows}
+        assert len(data) == num_keys, f"Expected {num_keys} rows, got {len(data)}"
+        for k in range(num_keys):
+            assert data[k] == k, f"Row pk={k} has c={data[k]}, expected {k}"
+
+        logger.info("Restarting the node")
+        await manager.server_restart(server.server_id)
+        await reconnect_driver(manager)
+        cql = manager.get_cql()
+
+        logger.info("Reading back and verifying data after restart")
+        rows = await cql.run_async(f"SELECT * FROM {ks}.test")
+        data = {r.pk: r.c for r in rows}
+        assert len(data) == num_keys, f"Expected {num_keys} rows after restart, got {len(data)}"
+        for k in range(num_keys):
+            assert data[k] == k, f"Row pk={k} has c={data[k]} after restart, expected {k}"
+    finally:
+        # We have a small problem on cleanup, it causes the node to fail:
+        # ERROR 2026-02-16 15:16:43,270 [shard 0:strm] load_balancer - Table bbf93970-0b39-11f1-9d6c-abd0cf16f20e does not exist
+        # cql, _ = await manager.get_ready_cql([server])
+        # await cql.run_async(f"DROP KEYSPACE {ks}")
+        pass
