@@ -285,13 +285,18 @@ class table_populator {
     global_table_ptr& _global_table;
     std::vector<lw_shared_ptr<sharded<sstables::sstable_directory>>> _sstable_directories;
     sstables::sstable_version_types _version_for_reshaping = sstables::oldest_writable_sstable_format;
+    bool _migration_mode = false;
+    compaction::owned_ranges_ptr _owned_ranges_ptr;
 
 public:
-    table_populator(global_table_ptr& ptr, sharded<replica::database>& db, sstring ks, sstring cf)
+    table_populator(global_table_ptr& ptr, sharded<replica::database>& db, sstring ks, sstring cf,
+            bool migration_mode = false, compaction::owned_ranges_ptr owned_ranges_ptr = nullptr)
         : _db(db)
         , _ks(std::move(ks))
         , _cf(std::move(cf))
         , _global_table(ptr)
+        , _migration_mode(migration_mode)
+        , _owned_ranges_ptr(owned_ranges_ptr)
     {
     }
 
@@ -402,7 +407,7 @@ future<> table_populator::populate_subdir(sharded<sstables::sstable_directory>& 
         }).get();
 
         return make_sstable(*_global_table, state, gen, _version_for_reshaping);
-    });
+    }, _owned_ranges_ptr, _migration_mode);
 
     // The node is offline at this point so we are very lenient with what we consider
     // offstrategy.
@@ -446,7 +451,21 @@ future<> distributed_loader::populate_keyspace(sharded<replica::database>& db,
 
         dblog.info("Keyspace {}: Reading CF {} id={} version={} storage={}", ks_name, cfname, uuid, s->version(), cf.get_storage_options());
 
-        auto metadata = table_populator(gtable, db, ks_name, cfname);
+        dblog.info("Table {}.{}: cf.uses_tablets() = {}, ks.uses_tablets() = {}", ks_name, cfname, cf.uses_tablets(), ks.uses_tablets());
+        bool migration_mode = cf.uses_tablets() && !ks.uses_tablets();
+        compaction::owned_ranges_ptr owned_ranges_ptr = nullptr;
+        if (migration_mode) {
+            // Build owned_ranges from the tablet map.
+            auto& tmap = db.local().get_shared_token_metadata().get()->tablets().get_tablet_map(uuid);
+            dht::token_range_vector ranges;
+            ranges.reserve(tmap.tablet_count());
+            for (auto tid : tmap.tablet_ids()) {
+                ranges.push_back(tmap.get_token_range(tid));
+            }
+            owned_ranges_ptr = compaction::make_owned_ranges_ptr(std::move(ranges));
+        }
+
+        auto metadata = table_populator(gtable, db, ks_name, cfname, migration_mode, std::move(owned_ranges_ptr));
         std::exception_ptr ex;
 
         try {
