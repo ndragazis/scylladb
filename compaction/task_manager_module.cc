@@ -160,7 +160,13 @@ future<> reshard(sstables::sstable_directory& dir, sstables::sstable_directory::
     // There is a semaphore inside the compaction manager in run_resharding_jobs. So we
     // parallel_for_each so the statistics about pending jobs are updated to reflect all
     // jobs. But only one will run in parallel at a time
-    auto& t = table.try_get_compaction_group_view_with_static_sharding();
+    //
+    // The compaction group view is used here only for job registration and gate-holding;
+    // resharding never reads or writes the group's own SSTables. With static (vnode)
+    // sharding there is exactly one group per shard; with tablets there may be many.
+    // In either case, any registered group suffices.
+    auto cg = table.get_compaction_group(0);
+    auto& t = cg->as_view_for_static_sharding();
     co_await coroutine::parallel_for_each(buckets, [&] (std::vector<sstables::shared_sstable>& sstlist) mutable {
         return table.get_compaction_manager().run_custom_job(t, compaction_type::Reshard, "Reshard compaction", [&] (compaction_data& info, compaction_progress_monitor& progress_monitor) -> future<> {
             auto erm = table.get_effective_replication_map(); // keep alive around compaction.

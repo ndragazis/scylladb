@@ -401,6 +401,7 @@ future<> table_populator::populate_subdir(sharded<sstables::sstable_directory>& 
     auto state = directory.local().state();
     dblog.debug("Populating {}/{}/{} state={}", _ks, _cf, _global_table->get_storage_options(), state);
 
+    dblog.info("table_allocator {}.{}: Calling reshard compaction: _migration_mode={}", _ks, _cf, _migration_mode);
     co_await distributed_loader::reshard(directory, _db, _ks, _cf, [this, state] (shard_id shard) mutable {
         auto gen = smp::submit_to(shard, [this] () {
             return _global_table->calculate_generation_for_new_table();
