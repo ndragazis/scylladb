@@ -6040,33 +6040,20 @@ future<> storage_service::update_tablet_metadata(const locator::tablet_metadata_
     wake_up_topology_state_machine();
 }
 
-future<> storage_service::maybe_migrate_table_to_tablets() {
-    SCYLLA_ASSERT(this_shard_id() == 0);
-
-    const auto& cfg = _db.local().get_config();
-    auto table_spec = cfg.migrate_to_tablets();
-    if (table_spec.empty()) {
-        co_return;
+future<> storage_service::prepare_for_tablets_migration(table_id tid) {
+    if (this_shard_id() != 0) {
+        co_return co_await container().invoke_on(0, [&] (auto& ss) {
+            return ss.prepare_for_tablets_migration(tid);
+        });
     }
 
-    // Parse "keyspace.table" format
-    auto dot_pos = table_spec.find('.');
-    if (dot_pos == sstring::npos) {
-        throw std::runtime_error(fmt::format("Invalid migrate_to_tablets value '{}': expected 'keyspace.table' format", table_spec));
-    }
-    auto ks_name = table_spec.substr(0, dot_pos);
-    auto cf_name = table_spec.substr(dot_pos + 1);
+    auto& db = _db.local();
+    auto& cf = db.find_column_family(tid);
+    auto schema = cf.schema();
+    auto& ks_name = schema->ks_name();
+    auto& cf_name = schema->cf_name();
 
     slogger.info("Migrating table {}.{} from vnodes to tablets", ks_name, cf_name);
-
-    // Look up the table
-    auto& db = _db.local();
-    if (!db.has_keyspace(ks_name)) {
-        throw std::runtime_error(fmt::format("migrate_to_tablets: keyspace '{}' not found", ks_name));
-    }
-    auto& cf = db.find_column_family(ks_name, cf_name);
-    auto schema = cf.schema();
-    auto tid = schema->id();
 
     if (cf.uses_tablets()) {
         slogger.info("Table {}.{} already uses tablets, skipping migration", ks_name, cf_name);
@@ -7615,6 +7602,8 @@ future<> storage_service::set_tablet_balancing_enabled(bool enabled) {
         }
     }
 }
+
+
 
 future<> storage_service::await_topology_quiesced() {
     auto holder = _async_gate.hold();

@@ -300,7 +300,7 @@ public:
 
     /// Migrate a vnode table to tablets.
     /// Builds a tablet map from vnode token boundaries and persists to group0.
-    future<> maybe_migrate_table_to_tablets();
+    future<> prepare_for_tablets_migration(table_id tid);
 
     void start_tablet_split_monitor();
 private:

@@ -1723,6 +1723,17 @@ rest_tablet_balancing_enable(sharded<service::storage_service>& ss, std::unique_
 
 static
 future<json::json_return_type>
+rest_migrate_to_tablets(http_context& ctx, sharded<service::storage_service>& ss, std::unique_ptr<http::request> req) {
+    const auto ks = req->get_query_param("keyspace");
+    const auto table = req->get_query_param("table");
+    auto table_id = validate_table(ctx.db.local(), ks, table);
+
+    co_await ss.local().prepare_for_tablets_migration(table_id);
+    co_return json_void();
+}
+
+static
+future<json::json_return_type>
 rest_quiesce_topology(sharded<service::storage_service>& ss, std::unique_ptr<http::request> req) {
         co_await ss.local().await_topology_quiesced();
         co_return json_void();
@@ -1869,6 +1880,7 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
     ss::del_tablet_replica.set(r, rest_bind(rest_del_tablet_replica, ctx, ss));
     ss::repair_tablet.set(r, rest_bind(rest_repair_tablet, ctx, ss));
     ss::tablet_balancing_enable.set(r, rest_bind(rest_tablet_balancing_enable, ss));
+    ss::migrate_to_tablets.set(r, rest_bind(rest_migrate_to_tablets, ctx, ss));
     ss::quiesce_topology.set(r, rest_bind(rest_quiesce_topology, ss));
     sp::get_schema_versions.set(r, rest_bind(rest_get_schema_versions, ss));
     ss::drop_quarantined_sstables.set(r, rest_bind(rest_drop_quarantined_sstables, ctx, ss));
@@ -1946,6 +1958,7 @@ void unset_storage_service(http_context& ctx, routes& r) {
     ss::del_tablet_replica.unset(r);
     ss::repair_tablet.unset(r);
     ss::tablet_balancing_enable.unset(r);
+    ss::migrate_to_tablets.unset(r);
     ss::quiesce_topology.unset(r);
     sp::get_schema_versions.unset(r);
     ss::drop_quarantined_sstables.unset(r);

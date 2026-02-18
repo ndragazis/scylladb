@@ -3086,6 +3086,32 @@
          ]
       },
       {
+         "path":"/storage_service/migrate_to_tablets",
+         "operations":[{
+             "method":"POST",
+             "summary":"Prepares tablet map for vnode-to-tablet migration",
+             "type":"void",
+             "nickname":"migrate_to_tablets",
+             "produces":["application/json"],
+             "parameters":[
+                 {
+                     "name":"keyspace",
+                     "description":"Keyspace name",
+                     "required":true,
+                     "type":"string",
+                     "paramType":"query"
+                 },
+                 {
+                     "name":"table",
+                     "description":"Table name",
+                     "required":true,
+                     "type":"string",
+                     "paramType":"query"
+                 }
+             ]
+         }]
+      },
+      {
          "path":"/storage_service/quiesce_topology",
          "operations":[
             {
