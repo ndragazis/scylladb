@@ -1116,7 +1116,20 @@ void database::add_column_family(keyspace& ks, schema_ptr schema, column_family:
         }
         erm = pt_rs->make_replication_map(schema->id(), metadata_ptr);
     } else {
-        erm = ks.get_static_effective_replication_map();
+        auto metadata_ptr = not_commited_new_metadata ? not_commited_new_metadata : _shared_token_metadata.get();
+        if (metadata_ptr->tablets().has_tablet_map(schema->id())) {
+            // Table under vnode-to-tablet migration: the keyspace uses vnode-based
+            // replication but this table already has a tablet map persisted in group0.
+            // Build a tablet-aware RS with the same replication options so the table
+            // gets a tablet ERM (and thus a tablet_storage_group_manager).
+            locator::replication_strategy_params params(rs.get_config_options(), 0, std::nullopt);
+            auto tablet_rs = locator::abstract_replication_strategy::create_replication_strategy(
+                    ks.metadata()->strategy_name(), params, metadata_ptr->get_topology());
+            auto pt_rs = tablet_rs->maybe_as_per_table();
+            erm = pt_rs->make_replication_map(schema->id(), metadata_ptr);
+        } else {
+            erm = ks.get_static_effective_replication_map();
+        }
     }
     // avoid self-reporting
     auto& sst_manager = get_sstables_manager(*schema);
