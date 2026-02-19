@@ -30,6 +30,8 @@ import random
 import os
 import glob
 import shutil
+import subprocess
+import json
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -1882,4 +1884,177 @@ async def test_migrate_vnode_table_to_tablets(manager: ManagerClient):
         # ERROR 2026-02-16 15:16:43,270 [shard 0:strm] load_balancer - Table bbf93970-0b39-11f1-9d6c-abd0cf16f20e does not exist
         # cql, _ = await manager.get_ready_cql([server])
         # await cql.run_async(f"DROP KEYSPACE {ks}")
+        pass
+
+
+def get_sstable_token_ranges(scylla_path: str, scylla_yaml: str, sstable_data_files: list[str]) -> list[tuple[int, int]]:
+    """Run 'scylla sstable dump-summary' and return a list of (first_token, last_token) per SSTable.
+
+    Args:
+        scylla_path: Path to the scylla executable.
+        scylla_yaml: Path to the scylla.yaml config file.
+        sstable_data_files: List of SSTable Data.db file paths.
+
+    Returns:
+        A list of (first_token, last_token) tuples, one per SSTable.
+    """
+    try:
+        result = subprocess.check_output(
+            [scylla_path, "sstable", "dump-summary",
+             "--scylla-yaml-file", scylla_yaml,
+             "--sstables"] + sstable_data_files,
+            stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        logger.error(f"scylla sstable dump-summary failed with exit code {e.returncode}")
+        logger.error(f"stdout: {e.output.decode('utf-8', 'ignore')}")
+        logger.error(f"stderr: {e.stderr.decode('utf-8', 'ignore')}")
+        raise
+    summary = json.loads(result.decode('utf-8', 'ignore'))
+    ranges = []
+    for _, info in summary["sstables"].items():
+        first_token = int(info["first_key"]["token"])
+        last_token = int(info["last_key"]["token"])
+        ranges.append((first_token, last_token))
+    return ranges
+
+
+def sstable_range_within_vnode(first_token: int, last_token: int, vnode_boundaries: list[int]) -> bool:
+    """Check whether an SSTable's token range falls entirely within a single vnode range.
+
+    Args:
+        first_token: The first token in the SSTable.
+        last_token: The last token in the SSTable.
+        vnode_boundaries: Sorted list of vnode token boundaries.
+
+    Returns:
+        True if both first_token and last_token fall within the same vnode range.
+    """
+    def find_owning_vnode(token: int) -> int:
+        """Return the index of the vnode that owns this token."""
+        for i, boundary in enumerate(vnode_boundaries):
+            if token <= boundary:
+                return i
+        # Token is above the last boundary, wraps to vnode 0
+        return 0
+
+    return find_owning_vnode(first_token) == find_owning_vnode(last_token)
+
+
+@pytest.mark.asyncio
+async def test_migrate_vnode_table_to_tablets_resharding(manager: ManagerClient):
+    """Verifies vnode-to-tablet migration via the REST API with resharding.
+
+    Tests that:
+    1. The migrate_to_tablets API creates a tablet map without requiring restart.
+    2. After restart, resharding produces SSTables whose token ranges respect
+       vnode token boundaries (each SSTable falls within a single vnode range).
+
+    Steps:
+    1. Start a single node with multiple shards and 16 power-of-2 aligned vnodes.
+    2. Create a vnode keyspace and table, populate data across multiple SSTables.
+    3. Call the migrate_to_tablets REST API to create the tablet map.
+    4. Verify tablet map creation and token alignment.
+    5. Restart the node (triggers resharding by vnode boundaries).
+    6. Verify that each resharded SSTable's token range falls within a single vnode.
+    7. Verify data integrity.
+    """
+    num_shards = 4
+    tokens_per_node = 16
+    num_keys = 5000
+
+    logger.info(f"Starting a node with {num_shards} shards and {tokens_per_node} power-of-2 aligned tokens")
+    tokens = calculate_powof2_tokens(num_nodes=1, tokens_per_node=tokens_per_node)
+    token_list = tokens[1]  # server_id 1
+    initial_token = ','.join([str(t) for t in token_list])
+    servers = (await manager.servers_add(1, cmdline=['--smp', str(num_shards), '--initial-token', initial_token, '--logger-log-level', 'compaction=debug']))
+    server = servers[0]
+
+    cql = manager.get_cql()
+
+    logger.info("Creating keyspace and table with tablets disabled")
+    ks = unique_name()
+    await cql.run_async(f"CREATE KEYSPACE {ks} "
+                        f"WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': 1}} "
+                        f"AND tablets = {{'enabled': false}}")
+    # Create the table with compaction disabled to ensure Scylla won't delete
+    # SSTables while we're checking them.
+    await cql.run_async(f"CREATE TABLE {ks}.test (pk int PRIMARY KEY, c int) WITH compaction = {{'class': 'IncrementalCompactionStrategy', 'enabled': false}}")
+
+    try:
+        logger.info("Inserting data and creating multiple SSTables")
+        stmt = cql.prepare(f"INSERT INTO {ks}.test (pk, c) VALUES (?, ?)")
+        batch_size = num_keys // 5
+        for batch_start in range(0, num_keys, batch_size):
+            batch_end = min(batch_start + batch_size, num_keys)
+            await asyncio.gather(*[cql.run_async(stmt, [k, k]) for k in range(batch_start, batch_end)])
+            await manager.api.keyspace_flush(server.ip_addr, ks, "test")
+
+        # Collect SSTable info before migration
+        node_workdir = await manager.server_get_workdir(server.server_id)
+        scylla_path = await manager.server_get_exe(server.server_id)
+        scylla_yaml = os.path.join(node_workdir, "conf", "scylla.yaml")
+        table_data_dir = glob.glob(os.path.join(node_workdir, "data", ks, "test-*"))[0]
+        pre_migration_sstables = glob.glob(os.path.join(table_data_dir, "*-Data.db"))
+        logger.info(f"Pre-migration SSTable count: {len(pre_migration_sstables)}")
+
+        # Verify that at least one SSTable crosses a vnode boundary before migration,
+        # to make sure that resharding will actually have work to do.
+        vnode_boundaries = sorted(token_list)
+        pre_migration_ranges = get_sstable_token_ranges(scylla_path, scylla_yaml, pre_migration_sstables)
+        cross_vnode_count = sum(1 for first, last in pre_migration_ranges
+                                if not sstable_range_within_vnode(first, last, vnode_boundaries))
+        logger.info(f"Pre-migration: {cross_vnode_count}/{len(pre_migration_ranges)} SSTables span multiple vnodes")
+        assert cross_vnode_count >= 1, \
+            "Expected at least one pre-migration SSTable to span multiple vnode ranges"
+
+        logger.info("Calling migrate_to_tablets API")
+        await manager.api.migrate_to_tablets(server.ip_addr, ks, "test")
+
+        logger.info("Verifying that the tablet map was created")
+        tablet_count = await get_tablet_count(manager, server, ks, 'test')
+        assert tablet_count == tokens_per_node, \
+            f"Expected {tokens_per_node} tablet(s), got {tablet_count}"
+
+        tablet_replicas = await get_all_tablet_replicas(manager, server, ks, 'test')
+        assert len(tablet_replicas) == tokens_per_node, \
+            f"Expected {tokens_per_node} tablet replica entries, got {len(tablet_replicas)}"
+
+        logger.info("Verifying that tablet tokens match vnode tokens")
+        tablet_tokens = sorted([tr.last_token for tr in tablet_replicas])
+        assert tablet_tokens == vnode_boundaries, \
+            f"Tablet tokens {tablet_tokens} do not match vnode tokens {vnode_boundaries}"
+
+        logger.info("Restarting the node to trigger resharding")
+        await manager.server_stop_gracefully(server.server_id)
+        await manager.server_update_config(server.server_id, 'migrate_to_tablets', f'{ks}.test')
+        await manager.server_start(server.server_id)
+        await reconnect_driver(manager)
+        cql = manager.get_cql()
+
+        # After restart, resharding should have produced new SSTables
+        post_restart_sstables = glob.glob(os.path.join(table_data_dir, "*-Data.db"))
+        logger.info(f"Post-restart SSTable count: {len(post_restart_sstables)}")
+
+        post_restart_ranges = get_sstable_token_ranges(scylla_path, scylla_yaml, post_restart_sstables)
+        logger.info(f"Post-restart SSTable token ranges:")
+        for i, (first, last) in enumerate(post_restart_ranges):
+            within = sstable_range_within_vnode(first, last, vnode_boundaries)
+            logger.info(f"  SSTable {i}: tokens [{first}, {last}], within single vnode: {within}")
+
+        # Verify that every resharded SSTable falls within a single vnode range
+        for i, (first, last) in enumerate(post_restart_ranges):
+            assert sstable_range_within_vnode(first, last, vnode_boundaries), \
+                f"Post-restart SSTable {i} with token range [{first}, {last}] " \
+                f"spans multiple vnode ranges (boundaries: {vnode_boundaries})"
+
+        logger.info("Verifying data integrity after restart")
+        rows = await cql.run_async(f"SELECT * FROM {ks}.test")
+        data = {r.pk: r.c for r in rows}
+        expected = {k: k for k in range(num_keys)}
+        if data != expected:
+            missing = expected.keys() - data.keys()
+            extra = data.keys() - expected.keys()
+            wrong = {k: (data[k], expected[k]) for k in data.keys() & expected.keys() if data[k] != expected[k]}
+            assert False, f"Data mismatch: missing keys {missing}, extra keys {extra}, wrong values {wrong}"
+    finally:
         pass
