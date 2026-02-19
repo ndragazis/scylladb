@@ -165,7 +165,10 @@ future<> reshard(sstables::sstable_directory& dir, sstables::sstable_directory::
     // resharding never reads or writes the group's own SSTables. With static (vnode)
     // sharding there is exactly one group per shard; with tablets there may be many.
     // In either case, any registered group suffices.
-    auto cg = table.get_compaction_group(0);
+    auto* cg = table.get_any_compaction_group();
+    if (!cg) {
+        on_internal_error(tasks::tmlogger, format("No compaction group found for table {}.{}", table.schema()->ks_name(), table.schema()->cf_name()));
+    }
     auto& t = cg->as_view_for_static_sharding();
     co_await coroutine::parallel_for_each(buckets, [&] (std::vector<sstables::shared_sstable>& sstlist) mutable {
         return table.get_compaction_manager().run_custom_job(t, compaction_type::Reshard, "Reshard compaction", [&] (compaction_data& info, compaction_progress_monitor& progress_monitor) -> future<> {
