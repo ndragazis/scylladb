@@ -6069,14 +6069,17 @@ future<> storage_service::prepare_for_tablets_migration(table_id tid) {
     slogger.info("Building tablet map for {}.{} with {} tablet(s) from {} vnode token(s)",
                  ks_name, cf_name, tablet_count, tablet_count);
 
-    // Build the tablet map: each tablet gets this node as the sole replica on shard 0.
+    // Build the tablet map: each tablet gets this node as the sole replica,
+    // with shards assigned in round-robin fashion so that resharding
+    // distributes work evenly across all shards.
     // The tablet boundaries are determined by the tablet_map's power-of-2 partitioning
     // of the token ring, which is aligned with compaction group boundaries.
     locator::tablet_map tmap(tablet_count);
+    auto num_shards = smp::count;
     for (size_t i = 0; i < tablet_count; ++i) {
         auto tablet = locator::tablet_id(i);
         locator::tablet_replica_set replicas;
-        replicas.push_back(locator::tablet_replica{my_host_id(), shard_id(0)});
+        replicas.push_back(locator::tablet_replica{my_host_id(), shard_id(i % num_shards)});
         tmap.set_tablet(tablet, locator::tablet_info(std::move(replicas)));
     }
 
