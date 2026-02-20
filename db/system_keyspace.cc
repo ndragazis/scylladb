@@ -314,6 +314,7 @@ schema_ptr system_keyspace::topology() {
             .with_column("upgrade_state", utf8_type, column_kind::static_column)
             .with_column("global_requests", set_type_impl::get_instance(timeuuid_type, true), column_kind::static_column)
             .with_column("paused_rf_change_requests", set_type_impl::get_instance(timeuuid_type, true), column_kind::static_column)
+            .with_column("intended_storage_mode", utf8_type)
             .set_comment("Current state of topology change machine")
             .with_hash_version()
             .build();
@@ -3258,6 +3259,11 @@ future<service::topology> system_keyspace::load_topology_state(const std::unorde
             }
         }
 
+        std::optional<service::intended_storage_mode> storage_mode;
+        if (row.has("intended_storage_mode")) {
+            storage_mode = service::intended_storage_mode_from_string(row.get_as<sstring>("intended_storage_mode"));
+        }
+
         std::unordered_map<raft::server_id, service::replica_state>* map = nullptr;
         if (nstate == service::node_state::normal) {
             map = &ret.normal_nodes;
@@ -3282,7 +3288,7 @@ future<service::topology> system_keyspace::load_topology_state(const std::unorde
             map->emplace(host_id, service::replica_state{
                 nstate, std::move(datacenter), std::move(rack), std::move(release_version),
                 ring_slice, shard_count, ignore_msb, std::move(supported_features),
-                service::cleanup_status_from_string(cleanup_status), request_id});
+                service::cleanup_status_from_string(cleanup_status), request_id, storage_mode});
         }
     }
 

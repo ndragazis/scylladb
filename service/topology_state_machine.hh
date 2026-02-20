@@ -93,6 +93,18 @@ struct ring_slice {
     std::unordered_set<dht::token> tokens;
 };
 
+// The intended storage mode for a node during vnodes-to-tablets migration.
+//
+// When migrating a table from vnodes to tablets, each node needs to reshard
+// its local SSTables to respect tablet boundaries. Conversely, SSTables need
+// to be resharded in the opposite direction when the operation is rolled back.
+// This property is an indicator that a node needs to perform resharding on
+// restart, and it declares the resharding direction.
+enum class intended_storage_mode : uint16_t {
+    vnodes,
+    tablets,
+};
+
 struct replica_state {
     node_state state;
     seastar::sstring datacenter;
@@ -104,6 +116,7 @@ struct replica_state {
     std::set<sstring> supported_features;
     cleanup_status cleanup;
     utils::UUID request_id; // id of the current request for the node or the last one if no current one exists
+    std::optional<intended_storage_mode> storage_mode;
 };
 
 struct topology_features {
@@ -332,12 +345,18 @@ std::optional<topology_request> try_topology_request_from_string(const sstring& 
 topology_request topology_request_from_string(const sstring& s);
 global_topology_request global_topology_request_from_string(const sstring&);
 cleanup_status cleanup_status_from_string(const sstring& s);
+intended_storage_mode intended_storage_mode_from_string(const sstring& s);
 topology::upgrade_state_type upgrade_state_from_string(const sstring&);
 }
 
 template <> struct fmt::formatter<service::cleanup_status> {
     constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
     auto format(service::cleanup_status status, fmt::format_context& ctx) const -> decltype(ctx.out());
+};
+
+template <> struct fmt::formatter<service::intended_storage_mode> {
+    constexpr auto parse(format_parse_context& ctx) { return ctx.begin(); }
+    auto format(service::intended_storage_mode mode, fmt::format_context& ctx) const -> decltype(ctx.out());
 };
 
 template <> struct fmt::formatter<service::topology::upgrade_state_type> {
