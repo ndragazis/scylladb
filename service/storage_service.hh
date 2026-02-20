@@ -301,6 +301,7 @@ public:
     /// Migrate a vnode table to tablets.
     /// Builds a tablet map from vnode token boundaries and persists to group0.
     future<> prepare_for_tablets_migration(table_id tid);
+    future<> mark_node_for_tablets_migration();
 
     void start_tablet_split_monitor();
 private:

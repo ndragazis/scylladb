@@ -6126,6 +6126,57 @@ future<> storage_service::prepare_for_tablets_migration(table_id tid) {
                  ks_name, cf_name, tablet_count);
 }
 
+future<> storage_service::mark_node_for_tablets_migration() {
+    if (this_shard_id() != 0) {
+        co_return co_await container().invoke_on(0, [] (auto& ss) {
+            return ss.mark_node_for_tablets_migration();
+        });
+    }
+
+    auto& raft_server = _group0->group0_server();
+    auto holder = _group0->hold_group0_gate();
+
+    slogger.info("Marking node {} for upgrade from vnodes to tablets", raft_server.id());
+
+    while (true) {
+        auto guard = co_await _group0->client().start_operation(_group0_as, raft_timeout{});
+
+        auto it = _topology_state_machine._topology.find(raft_server.id());
+        if (!it) {
+            throw std::runtime_error(::format("local node {} is not a member of the cluster", raft_server.id()));
+        }
+
+        const auto& rs = it->second;
+
+        if (rs.state != node_state::normal) {
+            throw std::runtime_error(::format("local node is not in the normal state (current state: {})", rs.state));
+        }
+
+        if (rs.storage_mode == intended_storage_mode::tablets) {
+            slogger.info("Node {} is already marked for tablets migration, skipping", raft_server.id());
+            co_return;
+        }
+
+        topology_mutation_builder builder(guard.write_timestamp());
+        builder.with_node(raft_server.id())
+               .set("intended_storage_mode", intended_storage_mode::tablets);
+
+        topology_change change{{builder.build()}};
+        group0_command g0_cmd = _group0->client().prepare_command(std::move(change), guard,
+            ::format("mark node {} for tablets migration", raft_server.id()));
+
+        try {
+            co_await _group0->client().add_entry(std::move(g0_cmd), std::move(guard), _group0_as);
+        } catch (group0_concurrent_modification&) {
+            slogger.info("mark_node_for_tablets_migration: concurrent modification, retrying");
+            continue;
+        }
+        break;
+    }
+
+    slogger.info("Successfully marked node {} for tablets migration", raft_server.id());
+}
+
 future<> storage_service::process_tablet_split_candidate(table_id table) noexcept {
     tasks::task_info tablet_split_task_info;
 

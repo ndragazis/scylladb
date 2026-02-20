@@ -1734,6 +1734,13 @@ rest_migrate_to_tablets(http_context& ctx, sharded<service::storage_service>& ss
 
 static
 future<json::json_return_type>
+rest_migrate_to_tablets_upgrade(http_context& ctx, sharded<service::storage_service>& ss, std::unique_ptr<http::request> req) {
+    co_await ss.local().mark_node_for_tablets_migration();
+    co_return json_void();
+}
+
+static
+future<json::json_return_type>
 rest_quiesce_topology(sharded<service::storage_service>& ss, std::unique_ptr<http::request> req) {
         co_await ss.local().await_topology_quiesced();
         co_return json_void();
@@ -1881,6 +1888,7 @@ void set_storage_service(http_context& ctx, routes& r, sharded<service::storage_
     ss::repair_tablet.set(r, rest_bind(rest_repair_tablet, ctx, ss));
     ss::tablet_balancing_enable.set(r, rest_bind(rest_tablet_balancing_enable, ss));
     ss::migrate_to_tablets.set(r, rest_bind(rest_migrate_to_tablets, ctx, ss));
+    ss::migrate_to_tablets_upgrade.set(r, rest_bind(rest_migrate_to_tablets_upgrade, ctx, ss));
     ss::quiesce_topology.set(r, rest_bind(rest_quiesce_topology, ss));
     sp::get_schema_versions.set(r, rest_bind(rest_get_schema_versions, ss));
     ss::drop_quarantined_sstables.set(r, rest_bind(rest_drop_quarantined_sstables, ctx, ss));
@@ -1959,6 +1967,7 @@ void unset_storage_service(http_context& ctx, routes& r) {
     ss::repair_tablet.unset(r);
     ss::tablet_balancing_enable.unset(r);
     ss::migrate_to_tablets.unset(r);
+    ss::migrate_to_tablets_upgrade.unset(r);
     ss::quiesce_topology.unset(r);
     sp::get_schema_versions.unset(r);
     ss::drop_quarantined_sstables.unset(r);

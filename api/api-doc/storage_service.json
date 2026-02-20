@@ -3112,6 +3112,18 @@
          }]
       },
       {
+         "path":"/storage_service/migrate_to_tablets/upgrade",
+         "operations":[{
+             "method":"POST",
+             "summary":"Mark this node for upgrade.",
+             "type":"void",
+             "nickname":"migrate_to_tablets_upgrade",
+             "produces":["application/json"],
+             "parameters":[
+             ]
+         }]
+      },
+      {
          "path":"/storage_service/quiesce_topology",
          "operations":[
             {
