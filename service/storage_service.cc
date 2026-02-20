@@ -69,6 +69,7 @@
 #include <seastar/core/thread.hh>
 #include <algorithm>
 #include "locator/local_strategy.hh"
+#include "locator/tablet_replication_strategy.hh"
 #include "utils/user_provided_param.hh"
 #include "version.hh"
 #include "streaming/stream_blob.hh"
@@ -3380,13 +3381,19 @@ future<token_metadata_change> storage_service::prepare_token_metadata_change(mut
             auto tmptr = change.pending_token_metadata_ptr[this_shard_id()];
             auto replications = schema_getter.get_keyspaces_replication();
             co_await schema_getter.for_each_table_schema_gently([&] (table_id id, schema_ptr table_schema) {
+                auto& old_rs = ss.get_database().find_column_family(id).get_effective_replication_map()->get_replication_strategy();
                 auto rs = replications.at(table_schema->ks_name());
                 locator::effective_replication_map_ptr erm;
                 if (auto pt_rs = rs->maybe_as_per_table()) {
                     erm = pt_rs->make_replication_map(id, tmptr);
-                } else if (tmptr->tablets().has_tablet_map(id)) {
-                    // Table under vnode-to-tablet migration: build a tablet-aware RS
-                    // with the same replication options as the keyspace, then build a tablet ERM.
+                } else if (old_rs.uses_tablets()) {
+                    // Table under vnode-to-tablet migration: the keyspace uses vnodes,
+                    // but the table uses a tablet-based ERM. Preserve ERM's flavor
+                    // with updated token metadata. During a migration, the ERM
+                    // flavor (i.e., vnodes or tablets) is determined on startup
+                    // by database::add_column_family() and only changes after a
+                    // user-initiated migration (or rollback) + a restart
+                    // (to reshard the SSTables while the node is offline).
                     auto expected = fmt::format("{}.{}", table_schema->ks_name(), table_schema->cf_name());
                     auto migration_table = ss.get_database().get_config().migrate_to_tablets();
                     if (!migration_table.empty() && migration_table != expected) {
@@ -3395,7 +3402,8 @@ future<token_metadata_change> storage_service::prepare_token_metadata_change(mut
                             expected, migration_table));
                     }
                     // Pass an arbitrary value to `initial_tablets` arg to cause the replication strategy to become tablet-aware.
-                    locator::replication_strategy_params params(rs->get_config_options(), 0 , std::nullopt);
+                    auto old_tablet_rs = old_rs.maybe_as_tablet_aware();
+                    locator::replication_strategy_params params(rs->get_config_options(), old_tablet_rs->get_initial_tablets(), old_tablet_rs->get_consistency());
                     auto& ks = ss.get_database().find_keyspace(table_schema->ks_name());
                     auto tablet_rs = locator::abstract_replication_strategy::create_replication_strategy(ks.metadata()->strategy_name(), params, tmptr->get_topology());
                     auto pt_rs = tablet_rs->maybe_as_per_table();
