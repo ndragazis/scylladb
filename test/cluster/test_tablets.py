@@ -2024,6 +2024,16 @@ async def test_migrate_vnode_table_to_tablets_resharding(manager: ManagerClient)
         assert tablet_tokens == vnode_boundaries, \
             f"Tablet tokens {tablet_tokens} do not match vnode tokens {vnode_boundaries}"
 
+        logger.info("Verifying data integrity after building tablet map and before resharding")
+        rows = await cql.run_async(f"SELECT * FROM {ks}.test")
+        data = {r.pk: r.c for r in rows}
+        expected = {k: k for k in range(num_keys)}
+        if data != expected:
+            missing = expected.keys() - data.keys()
+            extra = data.keys() - expected.keys()
+            wrong = {k: (data[k], expected[k]) for k in data.keys() & expected.keys() if data[k] != expected[k]}
+            assert False, f"Data mismatch: missing keys {missing}, extra keys {extra}, wrong values {wrong}"
+
         logger.info("Restarting the node to trigger resharding")
         await manager.server_stop_gracefully(server.server_id)
         await manager.server_update_config(server.server_id, 'migrate_to_tablets', f'{ks}.test')
