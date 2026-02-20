@@ -328,6 +328,10 @@ class ScyllaRESTAPIClient:
         """Prepare tablet map for vnode-to-tablet migration"""
         await self.client.post(f"/storage_service/migrate_to_tablets", host=node_ip, params={"keyspace": ks, "table": table})
 
+    async def mark_node_for_tablets_migration(self, node_ip: str) -> None:
+        """Mark the current node for vnode-to-tablet storage upgrade"""
+        await self.client.post(f"/storage_service/migrate_to_tablets/upgrade", host=node_ip)
+
     async def keyspace_upgrade_sstables(self, node_ip: str, ks: str) -> None:
         await self.client.get(f"/storage_service/keyspace_upgrade_sstables/{ks}", host=node_ip)
 
