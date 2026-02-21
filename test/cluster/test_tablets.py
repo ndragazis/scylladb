@@ -2037,6 +2037,16 @@ async def test_migrate_vnode_table_to_tablets_resharding(manager: ManagerClient)
         logger.info("Marking node for tablets migration")
         await manager.api.mark_node_for_tablets_migration(server.ip_addr)
 
+        logger.info("Verifying data integrity after marking the node for upgrade and before resharding (ensures that the node is still using the vnode-based ERM)")
+        rows = await cql.run_async(f"SELECT * FROM {ks}.test")
+        data = {r.pk: r.c for r in rows}
+        expected = {k: k for k in range(num_keys)}
+        if data != expected:
+            missing = expected.keys() - data.keys()
+            extra = data.keys() - expected.keys()
+            wrong = {k: (data[k], expected[k]) for k in data.keys() & expected.keys() if data[k] != expected[k]}
+            assert False, f"Data mismatch: missing keys {missing}, extra keys {extra}, wrong values {wrong}"
+
         logger.info("Restarting the node to trigger resharding")
         await manager.server_stop_gracefully(server.server_id)
         await manager.server_update_config(server.server_id, 'migrate_to_tablets', f'{ks}.test')
