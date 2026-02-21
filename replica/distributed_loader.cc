@@ -453,8 +453,7 @@ future<> distributed_loader::populate_keyspace(sharded<replica::database>& db,
         dblog.info("Keyspace {}: Reading CF {} id={} version={} storage={}", ks_name, cfname, uuid, s->version(), cf.get_storage_options());
 
         dblog.info("Table {}.{}: cf.uses_tablets() = {}, ks.uses_tablets() = {}", ks_name, cfname, cf.uses_tablets(), ks.uses_tablets());
-        auto storage_mode = db.local().get_shared_token_metadata().get()->get_topology().this_node()->get_intended_storage_mode();
-        bool migration_mode = cf.uses_tablets() && !ks.uses_tablets() && storage_mode == locator::node::storage_mode::tablets;
+        bool migration_mode = cf.uses_tablets() && !ks.uses_tablets();
         compaction::owned_ranges_ptr owned_ranges_ptr = nullptr;
         if (migration_mode) {
             // Build owned_ranges from the tablet map.
