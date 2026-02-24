@@ -895,10 +895,12 @@ void scrub_operation(schema_ptr schema, reader_permit permit, const std::vector<
 }
 
 void dump_index_operation(schema_ptr schema, reader_permit permit, const std::vector<sstables::shared_sstable>& sstables,
-        sstables::sstables_manager& sst_man, const db::config&, const bpo::variables_map&) {
+        sstables::sstables_manager& sst_man, const db::config&, const bpo::variables_map& vm) {
     if (sstables.empty()) {
         throw std::invalid_argument("no sstables specified on the command line");
     }
+
+    auto show_tokens = vm.count("show-tokens") > 0;
 
     json_writer writer;
     writer.StartStream();
@@ -917,7 +919,12 @@ void dump_index_operation(schema_ptr schema, reader_permit permit, const std::ve
             writer.StartObject();
             if (pkey) {
                 writer.Key("key");
-                writer.DataKey(*schema, *pkey);
+                if (show_tokens) {
+                    auto token = dht::get_token(*schema, *pkey);
+                    writer.DataKey(*schema, *pkey, token);
+                } else {
+                    writer.DataKey(*schema, *pkey);
+                }
             }
             writer.Key("pos");
             writer.Uint64(pos);
@@ -2373,7 +2380,10 @@ Positions (both that of partition and that of rows) is valid for uncompressed
 data.
 
 For more information, see: {}
-)", doc_link("operating-scylla/admin-tools/scylla-sstable#dump-index"))},
+)", doc_link("operating-scylla/admin-tools/scylla-sstable#dump-index")),
+            {
+                    typed_option<>("show-tokens", "compute and include the token for each partition key in the output"),
+            }},
             dump_index_operation},
 /* dump-compression-info */
     {{"dump-compression-info",
