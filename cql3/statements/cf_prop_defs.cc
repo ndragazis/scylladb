@@ -197,7 +197,7 @@ void cf_prop_defs::validate(const data_dictionary::database db, sstring ks_name,
         if (!db.features().tablet_options) {
             throw exceptions::configuration_exception("tablet options cannot be used until all nodes in the cluster enable this feature");
         }
-        db::tablet_options::validate(*tablet_options_map);
+        db::tablet_options::validate(*tablet_options_map, db.features());
     }
 
     if (has_property(KW_STORAGE_ENGINE)) {

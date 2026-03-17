@@ -146,6 +146,15 @@ db::tablet_options combine_tablet_options(R&& opts) {
                 combined_opts.max_tablet_count = std::min(*combined_opts.max_tablet_count, *opt.max_tablet_count);
             }
         }
+        if (opt.pow2_count) {
+            // We need some way to resolve conflicts.
+            // pow2_count will be true if any of the options wants pow2_count, because
+            // we want to treat pow2_count == true as a requirement (for backwards compatibility)
+            // while pow2_count = false like a preference. Not a hard reason.
+            if (!combined_opts.pow2_count || *opt.pow2_count) {
+                combined_opts.pow2_count = *opt.pow2_count;
+            }
+        }
     }
 
     if (total_expected_data_size_in_gb_count) {
@@ -1694,9 +1703,10 @@ public:
         size_t target_tablet_count; // Tablet count wanted by scheduler.
         sstring target_tablet_count_reason; // Winning rule for target_tablet_count value.
         std::optional<uint64_t> avg_tablet_size; // nullopt when stats not yet available.
+        bool pow2_count; // Whether tablet count for the table should be a power of two.
 
         // Final tablet count.
-        // It's target_tablet_count aligned to power of 2 if arbitrary_tablet_boundaries feature is not enabled.
+        // It's target_tablet_count aligned to power of 2 if pow2_count == true.
         size_t target_tablet_count_aligned;
 
         resize_decision::way_type resize_decision; // Decision which should be emitted to achieve target_tablet_count_aligned.
@@ -1846,6 +1856,9 @@ public:
         auto process_table = [&] (table_id table, const locator::table_group_set& tables, schema_ptr s, db::tablet_options tablet_options, const tablet_aware_replication_strategy* rs, size_t tablet_count) {
             table_sizing& table_plan = plan.tables[table];
             table_plan.current_tablet_count = tablet_count;
+            table_plan.pow2_count = tablet_options.pow2_count.value_or(
+                    _db.features().arbitrary_tablet_boundaries ? db::tablet_options::default_pow2_count : true);
+
             rs_by_table[table] = rs;
 
             // for a group of co-located tablets of size g with average tablet size t, the migration unit
@@ -1942,14 +1955,13 @@ public:
             table_plan.target_tablet_count = target_tablet_count.tablet_count;
             table_plan.target_tablet_count_reason = target_tablet_count.reason;
 
-            lblogger.debug("Table {} ({}.{}) target_tablet_count: {} ({})", table, s->ks_name(), s->cf_name(),
-                    table_plan.target_tablet_count, table_plan.target_tablet_count_reason);
+            lblogger.debug("Table {} ({}.{}) target_tablet_count: {} ({}), pow2_count: {}, opt: {}", table, s->ks_name(), s->cf_name(),
+                    table_plan.target_tablet_count, table_plan.target_tablet_count_reason, table_plan.pow2_count, tablet_options.to_map());
         };
 
         for (const auto& [table, tables] : _tm->tablets().all_table_groups()) {
             const auto& tmap = _tm->tablets().get_tablet_map(table);
             auto [s, rs] = get_schema_and_rs(table);
-
             auto tablet_options = combine_tablet_options(
                     tables | std::views::transform([&] (table_id table) { return _db.get_tables_metadata().get_table_if_exists(table); })
                            | std::views::filter([] (auto t) { return t != nullptr; })
@@ -2071,7 +2083,11 @@ public:
         //   table_plan.resize_decision
 
         for (auto&& [table, table_plan] : plan.tables) {
-            table_plan.target_tablet_count_aligned = 1u << log2ceil(table_plan.target_tablet_count);
+            if (!table_plan.pow2_count) {
+                table_plan.target_tablet_count_aligned = table_plan.target_tablet_count;
+            } else {
+                table_plan.target_tablet_count_aligned = 1u << log2ceil(table_plan.target_tablet_count);
+            }
 
             if (table_plan.target_tablet_count_aligned > table_plan.current_tablet_count) {
                 table_plan.resize_decision = locator::resize_decision::split();

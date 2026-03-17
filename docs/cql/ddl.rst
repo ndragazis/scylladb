@@ -500,6 +500,7 @@ Creating a new table uses the ``CREATE TABLE`` statement:
    tablet_option: 'expected_data_size_in_gb' ':' <int>
              : | 'min_per_shard_tablet_count' ':' <float>
              : | 'min_tablet_count' ':' <int>
+             : | 'pow2_count' ':' ( 'true' | 'false' )
 
 For instance::
 
@@ -1138,6 +1139,8 @@ if its data size, or performance requirements are known in advance.
                                                 This enables efficient file-based streaming during restore. Setting both
                                                 ``min_tablet_count`` and ``max_tablet_count`` to the same value fixes the
                                                 tablet count for the table.
+ ``pow2_count``                 "true"          When set to ``true``, the tablet count of a table is always a power of 2. The
+                                                count wanted due to all other factors is rounded up to the nearest power of 2.
 =============================== =============== ===================================================================================
 
 When allocating tablets for a new table, ScyllaDB uses the maximum of the ``initial`` tablets configured for the keyspace
