@@ -2386,6 +2386,152 @@ SEASTAR_THREAD_TEST_CASE(test_no_conflicting_internode_and_intra_merge_colocatio
     }, cfg).get();
 }
 
+void set_tablet_opts(cql_test_env& e, table_id table, const std::map<sstring, sstring>& opts) {
+    auto s = e.local_db().find_column_family(table).schema();
+    auto opts_string = fmt::to_string(fmt::join(opts | std::views::transform([] (auto&& e) {
+        return fmt::format("'{}': '{}'", e.first, e.second);
+    }), ", "));
+    e.execute_cql(fmt::format("alter table \"{}\".\"{}\" with tablets = {{{}}}",
+                         s->ks_name(), s->cf_name(), opts_string)).get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_merge_chooses_best_replica_with_odd_count) {
+    auto cfg = cql_test_config{};
+    cfg.db_config->tablets_per_shard_goal.set(10000); // Inhibit scaling-down of the count.
+    do_with_cql_env_thread([](auto& e) {
+        auto& stm = e.shared_token_metadata().local();
+
+        auto loc = stm.get()->get_topology().get_location();
+        topology_builder topo(e);
+        topo.add_node(node_state::normal, 1, loc);
+
+        // Choose the count so that it is even, but halving it repeatedly will produce odd numbers.
+        // In this case: 258 = binary 100000010
+        // Each merge does div_ceil() on the count, so the sequence will be:
+        // 258 -> 129 -> 65 -> 33 -> 17 -> 9 -> 5 -> 3 -> 2 -> 1
+        // This is the hard case for whole-table merge, which has to pick the right tablet to isolate
+        // to prevent large deviation of tablet sizes. If merge always chooses the last tablet to be isolated,
+        // it will be tiny after all merges are done.
+        size_t initial_count = 258;
+        auto ks_name = add_keyspace(e, {{loc.dc, 1}}, 1);
+        auto opts = std::map<sstring, sstring>({
+            {"min_tablet_count", std::to_string(initial_count)},
+            {"pow2_count", "false"}
+        });
+        auto table1 = add_table(e, ks_name, opts).get();
+
+        // Set sizes, small enough to allow for arbitrary merging.
+        topo.get_shared_load_stats().set_tablet_sizes(stm.get(), table1, 1);
+
+        {
+            auto& tmap = stm.get()->tablets().get_tablet_map(table1);
+            BOOST_REQUIRE(tmap.tablet_count() == initial_count);
+        }
+
+        // Pick a count which will make the table go through several merges,
+        // but is large enough so that we can assess imbalance.
+        size_t final_count = 5;
+        opts["min_tablet_count"] = std::to_string(final_count);
+        set_tablet_opts(e, table1, opts);
+        rebalance_tablets(e, &topo.get_shared_load_stats());
+
+        auto& tmap = stm.get()->tablets().get_tablet_map(table1);
+        BOOST_REQUIRE(tmap.tablet_count() == final_count);
+
+        min_max_tracker<uint64_t> size_minmax;
+        tmap.for_each_tablet([&] (tablet_id tid, const locator::tablet_info& tinfo) {
+            auto tablet_size = topo.get_shared_load_stats().get()->get_avg_tablet_size(tmap, global_tablet_id{table1, tid});
+            BOOST_REQUIRE(tablet_size.has_value());
+            testlog.info("Tablet {} size: {}", tid, *tablet_size);
+            size_minmax.update(*tablet_size);
+            return make_ready_future<>();
+        }).get();
+
+        // The largest tablet should be no smaller than the average tablet size (sanity check).
+        BOOST_REQUIRE_GE(size_minmax.max(), initial_count / final_count);
+
+        // The smallest tablet should be no smaller than half of the largest tablet.
+        BOOST_REQUIRE_GE(size_minmax.min(), size_minmax.max() / 2);
+    }, std::move(cfg)).get();
+}
+
+SEASTAR_THREAD_TEST_CASE(test_merge_stale_isolated_tablet_reproducer_odd_even_even) {
+    auto cfg = cql_test_config{};
+    cfg.db_config->tablets_per_shard_goal.set(10000); // Inhibit scaling-down of the count.
+    do_with_cql_env_thread([](auto& e) {
+        auto& stm = e.shared_token_metadata().local();
+
+        topology_builder topo(e);
+        topo.add_node(node_state::normal, 2);
+        topo.add_node(node_state::normal, 2);
+        topo.add_node(node_state::normal, 2);
+
+        const size_t initial_count = 7; // odd -> even -> even merge sequence starts here
+        auto ks_name = add_keyspace(e, {{topo.dc(), 1}}, 1);
+        auto opts = std::map<sstring, sstring>({
+            {"min_tablet_count", std::to_string(initial_count)},
+            {"pow2_count", "false"}
+        });
+        auto table1 = add_table(e, ks_name, opts).get();
+
+        auto& load_stats = topo.get_shared_load_stats();
+        load_stats.set_tablet_sizes(stm.get(), table1, 1);
+
+        // Make tablet 0 the largest so odd-count merge should isolate tablet 0.
+        auto& tmap = stm.get()->tablets().get_tablet_map(table1);
+        auto tid0 = tmap.first_tablet();
+        locator::range_based_tablet_id rb_tid0{table1, tmap.get_token_range(tid0)};
+        for (auto& r : tmap.get_tablet_info(tid0).replicas) {
+            load_stats.set_tablet_size(r.host, rb_tid0, 100);
+        }
+
+        // First stage: force exactly one odd->even merge: 7 -> 4.
+        opts["min_tablet_count"] = "4";
+        set_tablet_opts(e, table1, opts);
+
+        // Apply exactly one balancing iteration so the merge decision is emitted but not finalized.
+        bool first_iteration_done = false;
+        rebalance_tablets(e, &load_stats, {}, [&] (const migration_plan&) {
+            if (first_iteration_done) {
+                return true;
+            }
+            first_iteration_done = true;
+            return false;
+        });
+
+        {
+            auto& decision = stm.get()->tablets().get_tablet_map(table1).resize_decision();
+            BOOST_REQUIRE(decision.is_merge());
+            BOOST_REQUIRE(std::get<locator::resize_decision::merge>(decision.way).isolated_tablet == tablet_id(0));
+        }
+
+        // Finalize first merge fully, reaching even count 4.
+        rebalance_tablets(e, &load_stats);
+        BOOST_REQUIRE(stm.get()->tablets().get_tablet_map(table1).tablet_count() == 4);
+
+        // Second stage: another merge request on an even count, 4 -> 2.
+        opts["min_tablet_count"] = "2";
+        set_tablet_opts(e, table1, opts);
+
+        bool second_iteration_done = false;
+        rebalance_tablets(e, &load_stats, {}, [&] (const migration_plan&) {
+            if (second_iteration_done) {
+                return true;
+            }
+            second_iteration_done = true;
+            return false;
+        });
+
+        auto tm_from_disk = read_tablet_metadata(e.local_qp()).get();
+        auto& decision = tm_from_disk.get_tablet_map(table1).resize_decision();
+        BOOST_REQUIRE(std::holds_alternative<locator::resize_decision::merge>(decision.way));
+
+        // Expected for the second (even-count) merge: no isolated tablet.
+        // This assertion reproduces the current bug by failing with stale tablet_id(0).
+        BOOST_REQUIRE(std::get<locator::resize_decision::merge>(decision.way).isolated_tablet == std::nullopt);
+    }, std::move(cfg)).get();
+}
+
 SEASTAR_THREAD_TEST_CASE(test_rack_list_conversion) {
     do_with_cql_env_thread([] (auto& e) {
         topology_builder topo(e);
