@@ -4199,10 +4199,10 @@ future<> storage_service::set_node_intended_storage_mode(intended_storage_mode m
     slogger.info("Successfully set intended storage mode for node {} to {}", raft_server.id(), mode);
 }
 
-future<storage_service::keyspace_migration_status> storage_service::get_tablets_migration_status(const sstring& ks_name) {
+future<storage_service::keyspace_migration_status> storage_service::get_tablets_migration_status(const sstring& ks_name, storage_service::include_node_statuses include_nodes) {
     if (this_shard_id() != 0) {
-        co_return co_await container().invoke_on(0, [&ks_name] (auto& ss) {
-            return ss.get_tablets_migration_status(ks_name);
+        co_return co_await container().invoke_on(0, [&ks_name, include_nodes] (auto& ss) {
+            return ss.get_tablets_migration_status(ks_name, include_nodes);
         });
     }
 
@@ -4233,6 +4233,10 @@ future<storage_service::keyspace_migration_status> storage_service::get_tablets_
     }
 
     result.status = "migrating_to_tablets";
+
+    if (!include_nodes) {
+        co_return result;
+    }
 
     // Pick one table and query system.tablet_sizes to find which nodes
     // report tablet sizes (i.e. have loaded tablet-based ERMs).

@@ -295,13 +295,15 @@ public:
         sstring intended_mode; // "vnodes" or "tablets"
     };
 
+    using include_node_statuses = bool_class<struct include_node_statuses_tag>;
+
     struct keyspace_migration_status {
         sstring keyspace;
         sstring status; // "vnodes", "migrating_to_tablets", or "tablets"
         std::vector<node_migration_status> nodes;
     };
 
-    future<keyspace_migration_status> get_tablets_migration_status(const sstring& ks_name);
+    future<keyspace_migration_status> get_tablets_migration_status(const sstring& ks_name, include_node_statuses include_nodes = include_node_statuses::yes);
     future<> set_node_intended_storage_mode(intended_storage_mode mode);
     future<> finalize_tablets_migration(const sstring& ks_name);
 
