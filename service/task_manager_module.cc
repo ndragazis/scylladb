@@ -15,6 +15,7 @@
 #include "service/topology_state_machine.hh"
 #include "tasks/task_handler.hh"
 #include "tasks/virtual_task_hint.hh"
+#include "utils/UUID_gen.hh"
 #include <seastar/coroutine/maybe_yield.hh>
 
 namespace service {
@@ -469,5 +470,171 @@ task_manager_module::task_manager_module(tasks::task_manager& tm) noexcept
 
 }
 
+namespace vnodes_to_tablets {
+
+tasks::task_id migration_virtual_task::make_task_id(const sstring& keyspace) {
+    // Prefix the keyspace name with a unique identifier for this task to avoid
+    // collisions with other named UUIDs that may be added in the future.
+    auto uuid = utils::UUID_gen::get_name_UUID("vnodes_to_tablets_migration:" + keyspace);
+    return tasks::task_id{uuid};
+}
+
+std::optional<sstring> migration_virtual_task::find_keyspace_for_task_id(tasks::task_id id) const {
+    auto& db = _ss._db.local();
+    // Note: We could use a cache here, but it's probably an overkill.
+    // Scylla supports up to 1000 keyspaces, which is a relatively small number
+    // for UUID computation.
+    for (const auto& ks_name : db.get_all_keyspaces()) {
+        if (make_task_id(ks_name) == id) {
+            return ks_name;
+        }
+    }
+    return std::nullopt;
+}
+
+tasks::task_manager::task_group migration_virtual_task::get_group() const noexcept {
+    return tasks::task_manager::task_group::vnodes_to_tablets_migration_group;
+}
+
+future<std::optional<tasks::virtual_task_hint>> migration_virtual_task::contains(tasks::task_id task_id) const {
+    if (!task_id.uuid().is_name_based()) {
+        // Task id of migration task is always a named UUID.
+        co_return std::nullopt;
+    }
+    auto ks_name = find_keyspace_for_task_id(task_id);
+    if (!ks_name) {
+        co_return std::nullopt;
+    }
+    auto status = co_await _ss.get_tablets_migration_status(*ks_name, storage_service::include_node_statuses::no);
+    if (status.status != "migrating_to_tablets") {
+        co_return std::nullopt;
+    }
+    co_return tasks::virtual_task_hint{.keyspace_name = *ks_name};
+}
+
+future<std::optional<tasks::task_status>> migration_virtual_task::get_status(tasks::task_id id, tasks::virtual_task_hint hint) {
+    auto& ks_name = hint.keyspace_name;
+    if (!ks_name) {
+        co_return std::nullopt;
+    }
+    auto status = co_await _ss.get_tablets_migration_status(*ks_name, storage_service::include_node_statuses::yes);
+    if (status.status != "migrating_to_tablets") {
+        co_return std::nullopt;
+    }
+
+    // The progress tracks the number of nodes currently using tablets.
+    // During forward migration it increases; during rollback it decreases.
+    double nodes_upgraded = 0;
+    double total_nodes = status.nodes.size();
+    for (const auto& node : status.nodes) {
+        if (node.current_mode == "tablets") {
+            nodes_upgraded++;
+        }
+    }
+
+    co_return tasks::task_status{
+        .task_id = id,
+        .type = "vnodes_to_tablets_migration",
+        .kind = tasks::task_kind::cluster,
+        .scope = "keyspace",
+        .state = tasks::task_manager::task_state::running,
+        .is_abortable = tasks::is_abortable::no,
+        .start_time = {},
+        .end_time = {},
+        .error = "",
+        .parent_id = tasks::task_id::create_null_id(),
+        .sequence_number = 0,
+        .shard = 0,
+        .keyspace = *ks_name,
+        .table = "",
+        .entity = "",
+        .progress_units = "nodes",
+        .progress = tasks::task_manager::task::progress{nodes_upgraded, total_nodes},
+        .children = {},
+    };
+}
+
+future<std::optional<tasks::task_status>> migration_virtual_task::wait(tasks::task_id id, tasks::virtual_task_hint hint) {
+    auto& ks_name = hint.keyspace_name;
+    if (!ks_name) {
+        co_return std::nullopt;
+    }
+
+    auto& db = _ss._db.local();
+
+    std::optional<storage_service::keyspace_migration_status> status;
+    while (true) {
+        if (!db.has_keyspace(*ks_name)) {
+            status = std::nullopt;
+            break;
+        }
+        status = co_await _ss.get_tablets_migration_status(*ks_name, storage_service::include_node_statuses::no);
+        if (status->status != "migrating_to_tablets") {
+            break;
+        }
+        co_await _ss._topology_state_machine.event.wait();
+    }
+
+    bool migration_succeeded = status && status->status == "tablets";
+    auto state = migration_succeeded ? tasks::task_manager::task_state::done : tasks::task_manager::task_state::suspended;
+    double total_nodes = _ss._topology_state_machine._topology.normal_nodes.size();
+
+    co_return tasks::task_status{
+        .task_id = id,
+        .type = "vnodes_to_tablets_migration",
+        .kind = tasks::task_kind::cluster,
+        .scope = "keyspace",
+        .state = state,
+        .is_abortable = tasks::is_abortable::no,
+        .end_time = db_clock::now(),
+        .parent_id = tasks::task_id::create_null_id(),
+        .keyspace = *ks_name,
+        .progress_units = "nodes",
+        .progress = tasks::task_manager::task::progress{migration_succeeded ? total_nodes : 0, total_nodes},
+    };
+}
+
+future<> migration_virtual_task::abort(tasks::task_id id, tasks::virtual_task_hint hint) noexcept {
+    // Vnodes-to-tablets migration cannot be aborted via the task manager.
+    // It requires a manual rollback procedure.
+    return make_ready_future<>();
+}
+
+future<std::vector<tasks::task_stats>> migration_virtual_task::get_stats() {
+    std::vector<tasks::task_stats> result;
+    auto& db = _ss._db.local();
+    for (const auto& ks_name : db.get_all_keyspaces()) {
+        auto status = co_await _ss.get_tablets_migration_status(ks_name, storage_service::include_node_statuses::no);
+        if (status.status != "migrating_to_tablets") {
+            continue;
+        }
+        result.push_back(tasks::task_stats{
+            .task_id = make_task_id(ks_name),
+            .type = "vnodes_to_tablets_migration",
+            .kind = tasks::task_kind::cluster,
+            .scope = "keyspace",
+            .state = tasks::task_manager::task_state::running,
+            .sequence_number = 0,
+            .keyspace = ks_name,
+            .table = "",
+            .entity = "",
+            .shard = 0,
+            .start_time = {},
+            .end_time = {},
+        });
+    }
+    co_return result;
+}
+
+task_manager_module::task_manager_module(tasks::task_manager& tm, service::storage_service& ss) noexcept
+    : tasks::task_manager::module(tm, "vnodes_to_tablets_migration")
+    , _ss(ss)
+{}
+
+std::set<locator::host_id> task_manager_module::get_nodes() const {
+    return get_task_manager().get_nodes(_ss);
+}
+
+}
 
 }

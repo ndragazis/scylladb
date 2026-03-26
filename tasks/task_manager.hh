@@ -114,6 +114,7 @@ public:
         topology_change_group,
         tablets_group,
         global_topology_change_group,
+        vnodes_to_tablets_migration_group,
     };
 
     class task : public enable_lw_shared_from_this<task> {

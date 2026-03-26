@@ -226,6 +226,7 @@ private:
     shared_ptr<node_ops::task_manager_module> _node_ops_module;
     shared_ptr<service::task_manager_module> _tablets_module;
     shared_ptr<service::topo::task_manager_module> _global_topology_requests_module;
+    shared_ptr<service::vnodes_to_tablets::task_manager_module> _vnodes_to_tablets_migration_module;
     gms::gossip_address_map& _address_map;
     future<service::tablet_operation_result> do_tablet_operation(locator::global_tablet_id tablet,
                                  sstring op_name,
@@ -1059,6 +1060,7 @@ public:
     friend class tasks::task_manager;
     friend class tablet_virtual_task;
     friend class topo::global_topology_request_virtual_task;
+    friend class vnodes_to_tablets::migration_virtual_task;
 };
 
 }

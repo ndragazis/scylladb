@@ -228,6 +228,7 @@ storage_service::storage_service(abort_source& abort_source,
         , _node_ops_module(make_shared<node_ops::task_manager_module>(tm, *this))
         , _tablets_module(make_shared<service::task_manager_module>(tm, *this))
         , _global_topology_requests_module(make_shared<service::topo::task_manager_module>(tm))
+        , _vnodes_to_tablets_migration_module(make_shared<service::vnodes_to_tablets::task_manager_module>(tm, *this))
         , _address_map(address_map)
         , _shared_token_metadata(stm)
         , _erm_factory(erm_factory)
@@ -253,10 +254,12 @@ storage_service::storage_service(abort_source& abort_source,
     tm.register_module(_node_ops_module->get_name(), _node_ops_module);
     tm.register_module(_tablets_module->get_name(), _tablets_module);
     tm.register_module(_global_topology_requests_module->get_name(), _global_topology_requests_module);
+    tm.register_module(_vnodes_to_tablets_migration_module->get_name(), _vnodes_to_tablets_migration_module);
     if (this_shard_id() == 0) {
         _node_ops_module->make_virtual_task<node_ops::node_ops_virtual_task>(*this);
         _tablets_module->make_virtual_task<service::tablet_virtual_task>(*this);
         _global_topology_requests_module->make_virtual_task<service::topo::global_topology_request_virtual_task>(*this);
+        _vnodes_to_tablets_migration_module->make_virtual_task<service::vnodes_to_tablets::migration_virtual_task>(*this);
     }
     register_metrics();
 
@@ -2411,6 +2414,7 @@ future<> storage_service::stop() {
     co_await _tablets_module->stop();
     co_await _node_ops_module->stop();
     co_await _global_topology_requests_module->stop();
+    co_await _vnodes_to_tablets_migration_module->stop();
     co_await _async_gate.close();
     _tablet_split_monitor_event.signal();
     co_await std::move(_tablet_split_monitor);
