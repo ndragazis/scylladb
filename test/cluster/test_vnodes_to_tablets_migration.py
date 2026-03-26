@@ -18,6 +18,7 @@ from test.pylib.rest_client import HTTPError, read_barrier
 from test.pylib.internal_types import ServerInfo
 from test.pylib.manager_client import ManagerClient
 from test.cluster.util import new_test_keyspace, reconnect_driver
+from test.cluster.tasks.task_manager_client import TaskManagerClient
 
 logger = logging.getLogger(__name__)
 
@@ -113,10 +114,30 @@ async def verify_migration_status(manager: ManagerClient, server: ServerInfo,
                                   expected_node_statuses: dict[str, tuple[str, str]],
                                   retries: int = 0, retry_interval: float = 0):
     async def _check():
+        # Verify migration status via the migration status API
         status = await manager.api.get_vnode_tablet_migration_status(server.ip_addr, ks)
         actual_node_statuses = {n['host_id']: (n['current_mode'], n['intended_mode']) for n in status['nodes']}
         assert status['status'] == expected_status, f"Expected migration status '{expected_status}', got '{status['status']}'"
         assert actual_node_statuses == expected_node_statuses, f"Expected node statuses {expected_node_statuses}, got {actual_node_statuses}"
+
+        # Verify migration status via the tasks API
+        tm = TaskManagerClient(manager.api)
+        tasks = await tm.list_tasks(server.ip_addr, "vnodes_to_tablets_migration")
+        ks_tasks = [t for t in tasks if t.keyspace == ks]
+
+        if expected_status == "migrating_to_tablets":
+            assert len(ks_tasks) == 1, f"Expected 1 virtual task for keyspace '{ks}', got {len(ks_tasks)}"
+            task = ks_tasks[0]
+            assert task.state == "running", f"Expected task state 'running', got '{task.state}'"
+            assert task.type == "vnodes_to_tablets_migration", f"Expected task type 'vnodes_to_tablets_migration', got '{task.type}'"
+
+            task_status = await tm.get_task_status(server.ip_addr, task.task_id)
+            expected_total = len(expected_node_statuses)
+            expected_completed = sum(1 for cm, _ in expected_node_statuses.values() if cm == 'tablets')
+            assert task_status.progress_total == expected_total, f"Expected progress_total {expected_total}, got {task_status.progress_total}"
+            assert task_status.progress_completed == expected_completed, f"Expected progress_completed {expected_completed}, got {task_status.progress_completed}"
+        else:
+            assert len(ks_tasks) == 0, f"Expected no virtual tasks for keyspace '{ks}' when status is '{expected_status}', got {len(ks_tasks)}"
 
     for attempt in range(retries + 1):
         try:
@@ -636,6 +657,96 @@ async def test_migration_finalize_before_upgrade(manager: ManagerClient):
         # TODO: Remove this once support is added.
         await manager.api.downgrade_node_to_vnodes(server.ip_addr)
         await manager.api.finalize_vnode_tablet_migration(server.ip_addr, ks)
+
+
+@pytest.mark.asyncio
+async def test_migration_task_not_abortable(manager: ManagerClient):
+    """Verify that aborting a vnodes-to-tablets migration task via the task manager fails."""
+    server, cql = await setup_single_node_with_powof2_tokens(manager)
+
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks:
+        await cql.run_async(f"CREATE TABLE {ks}.t (pk int PRIMARY KEY)")
+        await manager.api.create_vnode_tablet_migration(server.ip_addr, ks)
+
+        tm = TaskManagerClient(manager.api)
+        tasks = await tm.list_tasks(server.ip_addr, "vnodes_to_tablets_migration")
+        ks_tasks = [t for t in tasks if t.keyspace == ks]
+        assert len(ks_tasks) == 1, f"Expected 1 migration task for keyspace '{ks}', got {len(ks_tasks)}"
+
+        task = ks_tasks[0]
+        status = await tm.get_task_status(server.ip_addr, task.task_id)
+        assert status.is_abortable is False, f"Expected task to be non-abortable, got is_abortable={status.is_abortable}"
+
+        with pytest.raises(HTTPError, match="cannot be aborted"):
+            await tm.abort_task(server.ip_addr, task.task_id)
+
+        # Rollback: schema changes are not yet supported for migrating keyspaces.
+        # TODO: Remove this once support is added.
+        await manager.api.finalize_vnode_tablet_migration(server.ip_addr, ks)
+
+
+@pytest.mark.asyncio
+async def test_migration_wait_task(manager: ManagerClient):
+    """Verify that the task manager "wait" API works for vnodes-to-tablets migration tasks.
+
+    Exercises two scenarios:
+    1. Wait on a migration task that is rolled back — expect "suspended" state.
+    2. Wait on a migration task that completes successfully — expect "done" state.
+    """
+    server, cql = await setup_single_node_with_powof2_tokens(manager)
+
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks:
+        await cql.run_async(f"CREATE TABLE {ks}.t (pk int PRIMARY KEY)")
+
+        tm = TaskManagerClient(manager.api)
+
+        # Scenario 1: wait + rollback
+
+        logger.info("Starting migration")
+        await manager.api.create_vnode_tablet_migration(server.ip_addr, ks)
+
+        tasks = await tm.list_tasks(server.ip_addr, "vnodes_to_tablets_migration")
+        assert len(tasks) == 1
+        assert tasks[0].keyspace == ks
+        task_id = tasks[0].task_id
+
+        logger.info("Starting wait on the migration task")
+        wait_task = asyncio.create_task(tm.wait_for_task(server.ip_addr, task_id))
+
+        logger.info("Rolling back migration")
+        await manager.api.finalize_vnode_tablet_migration(server.ip_addr, ks)
+
+        logger.info("Expecting wait to finish with 'suspended' state")
+        wait_status = await wait_task
+        assert wait_status.state == "suspended", f"Expected 'suspended' after rollback, got '{wait_status.state}'"
+        assert wait_status.progress_completed == 0, f"Expected 0 upgraded nods for rolled back migration, got {wait_status.progress_completed}"
+
+        # Scenario 2: wait + full migration
+
+        logger.info("Starting migration again")
+        await manager.api.create_vnode_tablet_migration(server.ip_addr, ks)
+
+        tasks = await tm.list_tasks(server.ip_addr, "vnodes_to_tablets_migration")
+        assert len(tasks) == 1
+        assert tasks[0].keyspace == ks
+        task_id = tasks[0].task_id
+
+        logger.info("Marking the node for tablets migration and restarting")
+        await manager.api.upgrade_node_to_tablets(server.ip_addr)
+        await manager.server_restart(server.server_id)
+        await reconnect_driver(manager)
+        cql, _ = await manager.get_ready_cql([server])
+
+        logger.info("Starting wait on the migration task")
+        wait_task = asyncio.create_task(tm.wait_for_task(server.ip_addr, task_id))
+
+        logger.info("Finalizing migration")
+        await manager.api.finalize_vnode_tablet_migration(server.ip_addr, ks)
+
+        logger.info("Expecting wait to finish with 'done' state")
+        wait_status = await wait_task
+        assert wait_status.state == "done", f"Expected 'done' after finalization, got '{wait_status.state}'"
+        assert wait_status.progress_completed == 1, f"Expected 1 upgraded node for completed migration, got {wait_status.progress_completed}"
 
 
 @pytest.mark.asyncio
