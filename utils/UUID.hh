@@ -52,6 +52,10 @@ public:
         return version() == 1;
     }
 
+    bool is_name_based() const noexcept {
+        return version() == 3;
+    }
+
     int64_t timestamp() const noexcept {
         //if (version() != 1) {
         //     throw new UnsupportedOperationException("Not a time-based UUID");
