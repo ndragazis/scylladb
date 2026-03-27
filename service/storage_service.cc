@@ -4014,13 +4014,6 @@ future<> storage_service::prepare_for_tablets_migration(const sstring& ks_name) 
             throw std::runtime_error(fmt::format("Keyspace {} has no tables to migrate. To use tablets, recreate the keyspace with tablets enabled", ks_name));
         }
 
-        const auto& tm = get_token_metadata();
-        const auto& sorted_tokens = tm.sorted_tokens();
-        size_t tablet_count = sorted_tokens.size();
-        if (!std::has_single_bit(tablet_count)) {
-            throw std::runtime_error(fmt::format("Table migration requires vnodes to be a power of two. Current value: {}", tablet_count));
-        }
-
         auto topology = co_await get_system_keyspace().load_topology_state({});
         for (const auto& [server_id, replica_state]: topology.normal_nodes) {
             if (replica_state.storage_mode) {
@@ -4050,15 +4043,32 @@ future<> storage_service::prepare_for_tablets_migration(const sstring& ks_name) 
 
         // Build a tablet_map from vnode token boundaries.
         //
-        // The map contains one tablet per vnode. The replicas of each tablet are
-        // the same as the replicas of the corresponding vnode. Shards are assigned
-        // in round-robin fashion per node so that tablets are evenly distributed
-        // within each node.
+        // The map contains one tablet per vnode, plus one extra tablet for the
+        // wrap-around range (last_vnode_token, MAX_TOKEN] when
+        // last_vnode_token != MAX_TOKEN. Each tablet has the same replicas as
+        // the corresponding vnode. Shards are assigned in round-robin fashion
+        // per node so that tablets are evenly distributed within each node.
         // (FIXME: we should consider tablet sizes as well)
         //
         // This map will serve as a template for per-table tablet map mutations.
         // Each table in the keyspace receives its own tablet map, but all maps
         // have identical tablet boundaries and replica placement.
+
+        const auto& tm = get_token_metadata();
+        const auto& sorted_tokens = tm.sorted_tokens();
+
+        utils::chunked_vector<dht::raw_token> last_tokens;
+        size_t tablet_count = sorted_tokens.size();
+        last_tokens.reserve(tablet_count + 1); // +1 for possible wrapping tablet
+        for (const auto& t : sorted_tokens) {
+            last_tokens.emplace_back(t);
+        }
+        // Add an extra tablet for the wrapping range if needed.
+        auto needs_wrapping_tablet = sorted_tokens.back() != dht::token::last();
+        if (needs_wrapping_tablet) {
+            last_tokens.emplace_back(dht::token::last());
+            tablet_count++;
+        }
 
         slogger.info("Building tablet maps for tables in keyspace {} with {} tablet(s)", ks_name, tablet_count);
 
@@ -4073,18 +4083,16 @@ future<> storage_service::prepare_for_tablets_migration(const sstring& ks_name) 
 
         auto erm = ks.get_static_effective_replication_map();
 
-        locator::tablet_map tmap(tablet_count);
+        locator::tablet_map tmap(std::move(last_tokens));
         for (size_t i = 0; i < tablet_count; ++i) {
             auto tablet = locator::tablet_id(i);
-            auto vnode_replica_hosts = erm->get_natural_replicas(sorted_tokens[i], true);
+            auto vnode_token = needs_wrapping_tablet && i == tablet_count - 1 ? tmap.get_last_token(locator::tablet_id{0}) : tmap.get_last_token(tablet);
+            auto vnode_replica_hosts = erm->get_natural_replicas(vnode_token, true);
             locator::tablet_replica_set tablet_replicas;
             for (auto host : vnode_replica_hosts) {
                 tablet_replicas.push_back(locator::tablet_replica{host, next_shard_for[host]()});
             }
             tmap.set_tablet(tablet, locator::tablet_info(std::move(tablet_replicas)));
-            if (tmap.get_last_token(tablet) != sorted_tokens[i]) {
-                throw std::runtime_error(fmt::format("vnode token {} is not aligned; cannot be used as tablet boundary (expected: {})", sorted_tokens[i], tmap.get_last_token(tablet)));
-            }
         }
 
         // Build tablet map mutations for all tables and persist them to group0 (system.tablets)
