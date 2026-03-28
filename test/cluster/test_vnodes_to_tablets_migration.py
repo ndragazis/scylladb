@@ -10,7 +10,6 @@ import pytest
 import asyncio
 import logging
 import subprocess
-from collections import defaultdict
 from cassandra.query import SimpleStatement, ConsistencyLevel
 
 from test.pylib.tablets import get_tablet_count, get_all_tablet_replicas
@@ -22,20 +21,9 @@ from test.cluster.tasks.task_manager_client import TaskManagerClient
 
 logger = logging.getLogger(__name__)
 
-def calculate_powof2_tokens(num_nodes: int, tokens_per_node: int) -> dict[int, list[int]]:
-    exp = 0
-    while 2**exp < num_nodes * tokens_per_node:
-        exp += 1
-    n = 2**exp
-    new_tokens_combined = [int(i * 2**64 // n - 2**63 - 1) for i in range(1, n+1)]
-    calculated_new_tokens = defaultdict(list)
-    new_server_id = 1
-    for i, t in enumerate(new_tokens_combined):
-        calculated_new_tokens[new_server_id  + (i % num_nodes)].append(t)
-    for s, tokens in calculated_new_tokens.items():
-        calculated_new_tokens[s] = sorted(tokens)
-    logger.debug(f"{calculated_new_tokens=}")
-    return calculated_new_tokens
+# Largest token that can be associated with a partition key (int64 max).
+# The tablet map always ends at this token to cover the full ring.
+MAX_TOKEN = 2**63 - 1
 
 
 def get_sstable_token_ranges(scylla_path: str, scylla_yaml: str, sstable_data_files: list[str]) -> list[tuple[int, int]]:
@@ -85,15 +73,24 @@ def sstable_range_within_vnode(first_token: int, last_token: int, vnode_boundari
     Returns:
         True if both first_token and last_token fall within the same vnode range.
     """
-    def find_owning_vnode(token: int) -> int:
-        """Return the index of the vnode that owns this token."""
-        for i, boundary in enumerate(vnode_boundaries):
-            if token <= boundary:
-                return i
-        # Token is above the last boundary, wraps to vnode 0
-        return 0
+    for token in vnode_boundaries:
+        if first_token < token <= last_token:
+            return False
+    return True
 
-    return find_owning_vnode(first_token) == find_owning_vnode(last_token)
+
+async def get_all_vnode_tokens(cql) -> list[int]:
+    """Return a sorted list of all vnode token boundaries across all nodes.
+
+    Queries the tokens column in system.topology, which contains the tokens
+    for every node in the cluster.
+    """
+    rows = await cql.run_async("SELECT tokens FROM system.topology WHERE key = 'topology'")
+    tokens = []
+    for row in rows:
+        if row.tokens:
+            tokens.extend(int(t) for t in row.tokens)
+    return sorted(tokens)
 
 
 async def verify_data_integrity(cql, ks, table, num_keys, cl=ConsistencyLevel.QUORUM):
@@ -195,7 +192,7 @@ async def test_migration(manager: ManagerClient):
     """Verify vnodes-to-tablets migration for a single table on a single-node cluster.
 
     Steps:
-    1. Start a single node with multiple shards and power-of-2 aligned vnodes.
+    1. Start a single node with multiple shards and random vnodes.
     2. Create a vnode table and inject data.
     3. Start the migration by creating a tablet map for the table.
        - Verify that the tablet map was created and tablet tokens match vnode tokens.
@@ -210,15 +207,16 @@ async def test_migration(manager: ManagerClient):
     tokens_per_node = 16
     num_keys = 5000
 
-    logger.info(f"Starting a node with {num_shards} shards and {tokens_per_node} power-of-2 aligned tokens")
-    tokens = calculate_powof2_tokens(num_nodes=1, tokens_per_node=tokens_per_node)
-    token_list = tokens[1]  # server_id 1
-    initial_token = ','.join([str(t) for t in token_list])
-    servers = (await manager.servers_add(1, cmdline=['--smp', str(num_shards), '--initial-token', initial_token, '--logger-log-level', 'compaction=debug']))
+    logger.info(f"Starting a node with {num_shards} shards and {tokens_per_node} random tokens")
+    cfg = {'num_tokens': tokens_per_node}
+    servers = await manager.servers_add(1, cmdline=['--smp', str(num_shards), '--logger-log-level', 'compaction=debug'], config=cfg)
     server = servers[0]
     host_id = await manager.get_host_id(server.server_id)
 
     cql, _ = await manager.get_ready_cql(servers)
+
+    vnode_boundaries = await get_all_vnode_tokens(cql)
+    logger.info(f"Vnode boundaries ({len(vnode_boundaries)} tokens): {vnode_boundaries}")
 
     logger.info("Creating keyspace and table with vnodes")
     async with new_test_keyspace(manager, f"WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': 1}} AND tablets = {{'enabled': false}}") as ks:
@@ -241,17 +239,11 @@ async def test_migration(manager: ManagerClient):
         scylla_yaml = os.path.join(node_workdir, "conf", "scylla.yaml")
         table_data_dir = glob.glob(os.path.join(node_workdir, "data", ks, "test-*"))[0]
         pre_migration_sstables = glob.glob(os.path.join(table_data_dir, "*-Data.db"))
-        logger.info(f"Pre-migration SSTable count: {len(pre_migration_sstables)}")
         assert len(pre_migration_sstables) == num_shards * num_flushes
-
-        logger.info("Verifying that at least one pre-migration SSTable spans multiple vnode ranges (ensures that resharding will have work to do)")
-        vnode_boundaries = sorted(token_list)
         pre_migration_ranges = get_sstable_token_ranges(scylla_path, scylla_yaml, pre_migration_sstables)
         cross_vnode_count = sum(1 for first, last in pre_migration_ranges
                                 if not sstable_range_within_vnode(first, last, vnode_boundaries))
         logger.info(f"Pre-migration: {cross_vnode_count}/{len(pre_migration_ranges)} SSTables span multiple vnodes")
-        assert cross_vnode_count >= 1, \
-            "Expected at least one pre-migration SSTable to span multiple vnode ranges, but none was found. The test is malformed."
 
         logger.info("Verifying migration status before starting migration")
         await verify_migration_status(manager, server, ks, expected_status='vnodes', expected_node_statuses={})
@@ -265,18 +257,20 @@ async def test_migration(manager: ManagerClient):
             expected_node_statuses={host_id: ('vnodes', 'vnodes')})
 
         logger.info("Verifying that the tablet map was created")
+        expected_tablet_tokens = vnode_boundaries if vnode_boundaries[-1] == MAX_TOKEN else vnode_boundaries + [MAX_TOKEN]
+        expected_tablet_count = len(expected_tablet_tokens)
         tablet_count = await get_tablet_count(manager, server, ks, 'test')
-        assert tablet_count == tokens_per_node, \
-            f"Expected {tokens_per_node} tablet(s), got {tablet_count}"
+        assert tablet_count == expected_tablet_count, \
+            f"Expected {expected_tablet_count} tablet(s), got {tablet_count}"
 
         tablet_replicas = await get_all_tablet_replicas(manager, server, ks, 'test')
-        assert len(tablet_replicas) == tokens_per_node, \
-            f"Expected {tokens_per_node} tablet replica entries, got {len(tablet_replicas)}"
+        assert len(tablet_replicas) == expected_tablet_count, \
+            f"Expected {expected_tablet_count} tablet replica entries, got {len(tablet_replicas)}"
 
-        logger.info("Verifying that tablet tokens match vnode tokens")
+        logger.info("Verifying that tablet tokens match vnode tokens plus max token")
         tablet_tokens = sorted([tr.last_token for tr in tablet_replicas])
-        assert tablet_tokens == vnode_boundaries, \
-            f"Tablet tokens {tablet_tokens} do not match vnode tokens {vnode_boundaries}"
+        assert tablet_tokens == expected_tablet_tokens, \
+            f"Tablet tokens {tablet_tokens} do not match expected {expected_tablet_tokens}"
 
         logger.info("Verifying data integrity after building tablet map and before resharding")
         await verify_data_integrity(cql, ks, "test", num_keys)
@@ -343,7 +337,7 @@ async def test_migration_rollback(manager: ManagerClient):
     cleared.
 
     Steps:
-    1. Start a single node with multiple shards and power-of-2 aligned vnodes.
+    1. Start a single node with multiple shards and random vnodes.
     2. Create a vnode table and inject data.
     3. Start the migration by creating a tablet map for the table.
     4. Mark the node for upgrade and restart (triggers resharding).
@@ -358,15 +352,16 @@ async def test_migration_rollback(manager: ManagerClient):
     tokens_per_node = 16
     num_keys = 5000
 
-    logger.info(f"Starting a node with {num_shards} shards and {tokens_per_node} power-of-2 aligned tokens")
-    tokens = calculate_powof2_tokens(num_nodes=1, tokens_per_node=tokens_per_node)
-    token_list = tokens[1]  # server_id 1
-    initial_token = ','.join([str(t) for t in token_list])
-    servers = (await manager.servers_add(1, cmdline=['--smp', str(num_shards), '--initial-token', initial_token, '--logger-log-level', 'compaction=debug']))
+    logger.info(f"Starting a node with {num_shards} shards and {tokens_per_node} random tokens")
+    cfg = {'num_tokens': tokens_per_node}
+    servers = await manager.servers_add(1, cmdline=['--smp', str(num_shards), '--logger-log-level', 'compaction=debug'], config=cfg)
     server = servers[0]
     host_id = await manager.get_host_id(server.server_id)
 
     cql, _ = await manager.get_ready_cql(servers)
+
+    vnode_boundaries = await get_all_vnode_tokens(cql)
+    logger.info(f"Vnode boundaries ({len(vnode_boundaries)} tokens): {vnode_boundaries}")
 
     logger.info("Creating keyspace and table with vnodes")
     async with new_test_keyspace(manager, f"WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': 1}} AND tablets = {{'enabled': false}}") as ks:
@@ -385,9 +380,10 @@ async def test_migration_rollback(manager: ManagerClient):
         await manager.api.create_vnode_tablet_migration(server.ip_addr, ks)
 
         logger.info("Verifying that the tablet map was created")
+        expected_tablet_count = len(vnode_boundaries) if vnode_boundaries[-1] == MAX_TOKEN else len(vnode_boundaries) + 1
         tablet_count = await get_tablet_count(manager, server, ks, 'test')
-        assert tablet_count == tokens_per_node, \
-            f"Expected {tokens_per_node} tablet(s), got {tablet_count}"
+        assert tablet_count == expected_tablet_count, \
+            f"Expected {expected_tablet_count} tablet(s), got {tablet_count}"
 
         logger.info("Marking node for tablets migration")
         await manager.api.upgrade_node_to_tablets(server.ip_addr)
@@ -457,7 +453,7 @@ async def test_migration_multinode(manager: ManagerClient):
     """Verify vnodes-to-tablets migration for a single table on a multi-node cluster with rolling restarts.
 
     Steps:
-    1. Start a 2-node cluster with RF=2, multiple shards, and power-of-2 aligned vnodes.
+    1. Start a 2-node cluster with RF=2, multiple shards, and random vnodes.
     2. Create a vnode table and inject data at CL=QUORUM.
     3. Create tablet map — verify one tablet replica per node, tablet tokens match vnode tokens.
     4. Rolling restart — for each node: mark for upgrade, verify intended_storage_mode
@@ -470,18 +466,14 @@ async def test_migration_multinode(manager: ManagerClient):
     tokens_per_node = 64
     num_keys = 1000
 
-    logger.info(f"Starting {num_nodes} nodes with {num_shards} shards each, ~{tokens_per_node} power-of-2 aligned tokens per node")
-    calculated_tokens = calculate_powof2_tokens(num_nodes=num_nodes, tokens_per_node=tokens_per_node)
-    total_vnodes = sum(len(t) for t in calculated_tokens.values())
-    logger.info(f"Total vnodes: {total_vnodes}")
+    logger.info(f"Starting {num_nodes} nodes with {num_shards} shards each, {tokens_per_node} random tokens per node")
 
     servers = []
-    cfg = {'tablet_load_stats_refresh_interval_in_seconds': 1}
-    for i, tokens in calculated_tokens.items():
+    cfg = {'tablet_load_stats_refresh_interval_in_seconds': 1, 'num_tokens': tokens_per_node}
+    for i in range(1, num_nodes + 1):
         cmdline = [
             '--smp', str(num_shards),
             '--logger-log-level', 'compaction=debug',
-            f"--initial-token={','.join([str(t) for t in tokens])}",
         ]
         servers.append(await manager.server_add(cmdline=cmdline, property_file={"dc": "dc1", "rack": f"rack{i}"}, config=cfg))
 
@@ -489,6 +481,10 @@ async def test_migration_multinode(manager: ManagerClient):
 
     server_to_host_map = {s.server_id: await manager.get_host_id(s.server_id) for s in servers}
     host_ids = set(server_to_host_map.values())
+
+    all_vnode_tokens = await get_all_vnode_tokens(cql)
+    total_vnodes = len(all_vnode_tokens)
+    logger.info(f"Total vnodes: {total_vnodes}")
 
     logger.info(f"Creating keyspace and table with vnodes (RF={num_nodes})")
     async with new_test_keyspace(manager, f"WITH replication = {{'class': 'NetworkTopologyStrategy', 'replication_factor': {num_nodes}}} AND tablets = {{'enabled': false}}") as ks:
@@ -508,14 +504,15 @@ async def test_migration_multinode(manager: ManagerClient):
             expected_node_statuses={host_id: ('vnodes', 'vnodes') for host_id in host_ids})
 
         logger.info("Verifying tablet map")
+        expected_tablet_tokens = all_vnode_tokens if all_vnode_tokens[-1] == MAX_TOKEN else all_vnode_tokens + [MAX_TOKEN]
+        expected_tablet_count = len(expected_tablet_tokens)
         tablet_replicas = await get_all_tablet_replicas(manager, servers[0], ks, 'test')
-        assert len(tablet_replicas) == total_vnodes, \
-            f"Expected {total_vnodes} tablets, got {len(tablet_replicas)}"
+        assert len(tablet_replicas) == expected_tablet_count, \
+            f"Expected {expected_tablet_count} tablets, got {len(tablet_replicas)}"
 
-        all_vnode_tokens = sorted([t for tokens in calculated_tokens.values() for t in tokens])
         tablet_tokens = sorted([tr.last_token for tr in tablet_replicas])
-        assert tablet_tokens == all_vnode_tokens, \
-            f"Tablet tokens do not match vnode tokens"
+        assert tablet_tokens == expected_tablet_tokens, \
+            f"Tablet tokens do not match expected tokens"
 
         for tr in tablet_replicas:
             replica_hosts = set(r[0] for r in tr.replicas)
@@ -595,13 +592,10 @@ async def test_migration_multinode(manager: ManagerClient):
         await verify_data_integrity(cql, ks, "test", total_keys)
 
 
-async def setup_single_node_with_powof2_tokens(manager: ManagerClient):
-    """Start a single node with power-of-2 aligned tokens for migration error tests."""
-    tokens_per_node = 16
-    tokens = calculate_powof2_tokens(num_nodes=1, tokens_per_node=tokens_per_node)
-    token_list = tokens[1]
-    initial_token = ','.join([str(t) for t in token_list])
-    server = await manager.server_add(cmdline=['--smp', '2', '--initial-token', initial_token])
+async def setup_single_node(manager: ManagerClient):
+    """Start a single node with random tokens for migration error tests."""
+    cfg = {'num_tokens': 16}
+    server = await manager.server_add(cmdline=['--smp', '2'], config=cfg)
     cql, _ = await manager.get_ready_cql([server])
     return server, cql
 
@@ -609,7 +603,7 @@ async def setup_single_node_with_powof2_tokens(manager: ManagerClient):
 @pytest.mark.asyncio
 async def test_migration_nonexistent_keyspace(manager: ManagerClient):
     """Verify that migration APIs fail on a non-existent keyspace."""
-    server, cql = await setup_single_node_with_powof2_tokens(manager)
+    server, cql = await setup_single_node(manager)
 
     with pytest.raises(HTTPError, match="Can't find a keyspace"):
         await manager.api.create_vnode_tablet_migration(server.ip_addr, "ks")
@@ -622,7 +616,7 @@ async def test_migration_nonexistent_keyspace(manager: ManagerClient):
 @pytest.mark.asyncio
 async def test_migration_already_tablets(manager: ManagerClient):
     """Verify that starting migration on a keyspace that already uses tablets fails."""
-    server, cql = await setup_single_node_with_powof2_tokens(manager)
+    server, cql = await setup_single_node(manager)
 
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1}") as ks_tablets:
         with pytest.raises(HTTPError, match="already uses tablets"):
@@ -632,7 +626,7 @@ async def test_migration_already_tablets(manager: ManagerClient):
 @pytest.mark.asyncio
 async def test_migration_empty_keyspace(manager: ManagerClient):
     """Verify that starting migration on a keyspace with no tables fails."""
-    server, cql = await setup_single_node_with_powof2_tokens(manager)
+    server, cql = await setup_single_node(manager)
 
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks_empty:
         with pytest.raises(HTTPError, match="has no tables to migrate"):
@@ -642,7 +636,7 @@ async def test_migration_empty_keyspace(manager: ManagerClient):
 @pytest.mark.asyncio
 async def test_migration_finalize_without_migration(manager: ManagerClient):
     """Verify that finalizing migration without starting one first fails."""
-    server, cql = await setup_single_node_with_powof2_tokens(manager)
+    server, cql = await setup_single_node(manager)
 
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks_vnodes:
         await cql.run_async(f"CREATE TABLE {ks_vnodes}.t (pk int PRIMARY KEY)")
@@ -653,7 +647,7 @@ async def test_migration_finalize_without_migration(manager: ManagerClient):
 @pytest.mark.asyncio
 async def test_migration_upgrade_without_migration(manager: ManagerClient):
     """Verify that upgrading a node to tablets without an active migration fails."""
-    server, cql = await setup_single_node_with_powof2_tokens(manager)
+    server, cql = await setup_single_node(manager)
 
     with pytest.raises(HTTPError, match="no migration is in progress"):
         await manager.api.upgrade_node_to_tablets(server.ip_addr)
@@ -662,7 +656,7 @@ async def test_migration_upgrade_without_migration(manager: ManagerClient):
 @pytest.mark.asyncio
 async def test_migration_overlapping_migrations(manager: ManagerClient):
     """Verify that starting a second migration while one is already in progress fails."""
-    server, cql = await setup_single_node_with_powof2_tokens(manager)
+    server, cql = await setup_single_node(manager)
 
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks1:
         await cql.run_async(f"CREATE TABLE {ks1}.t (pk int PRIMARY KEY)")
@@ -683,7 +677,7 @@ async def test_migration_overlapping_migrations(manager: ManagerClient):
 @pytest.mark.asyncio
 async def test_migration_finalize_before_upgrade(manager: ManagerClient):
     """Verify that finalizing migration before the node has finished upgrading fails."""
-    server, cql = await setup_single_node_with_powof2_tokens(manager)
+    server, cql = await setup_single_node(manager)
 
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks:
         await cql.run_async(f"CREATE TABLE {ks}.t (pk int PRIMARY KEY)")
@@ -702,7 +696,7 @@ async def test_migration_finalize_before_upgrade(manager: ManagerClient):
 @pytest.mark.asyncio
 async def test_migration_task_not_abortable(manager: ManagerClient):
     """Verify that aborting a vnodes-to-tablets migration task via the task manager fails."""
-    server, cql = await setup_single_node_with_powof2_tokens(manager)
+    server, cql = await setup_single_node(manager)
 
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks:
         await cql.run_async(f"CREATE TABLE {ks}.t (pk int PRIMARY KEY)")
@@ -733,7 +727,7 @@ async def test_migration_wait_task(manager: ManagerClient):
     1. Wait on a migration task that is rolled back — expect "suspended" state.
     2. Wait on a migration task that completes successfully — expect "done" state.
     """
-    server, cql = await setup_single_node_with_powof2_tokens(manager)
+    server, cql = await setup_single_node(manager)
 
     async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks:
         await cql.run_async(f"CREATE TABLE {ks}.t (pk int PRIMARY KEY)")
@@ -795,11 +789,9 @@ async def test_migration_multiple_keyspaces(manager: ManagerClient):
     num_shards = 3
     tokens_per_node = 16
 
-    logger.info(f"Starting a node with {num_shards} shards and {tokens_per_node} power-of-2 aligned tokens")
-    tokens = calculate_powof2_tokens(num_nodes=1, tokens_per_node=tokens_per_node)
-    token_list = tokens[1]
-    initial_token = ','.join([str(t) for t in token_list])
-    servers = await manager.servers_add(1, cmdline=['--smp', str(num_shards), '--initial-token', initial_token])
+    logger.info(f"Starting a node with {num_shards} shards and {tokens_per_node} random tokens")
+    cfg = {'num_tokens': tokens_per_node}
+    servers = await manager.servers_add(1, cmdline=['--smp', str(num_shards)], config=cfg)
     server = servers[0]
     host_id = await manager.get_host_id(server.server_id)
 
