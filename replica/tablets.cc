@@ -1057,7 +1057,7 @@ public:
 
     tablet_sstable_set(schema_ptr s, const storage_group_manager& sgm, const locator::tablet_map& tmap)
         : _schema(std::move(s))
-        , _tablet_map(tmap.tablet_count())
+        , _tablet_map(tmap.clone())
     {
         sgm.for_each_storage_group([this] (size_t id, storage_group& sg) {
             auto set = sg.make_sstable_set();
