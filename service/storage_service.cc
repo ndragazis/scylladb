@@ -4048,17 +4048,6 @@ future<> storage_service::prepare_for_tablets_migration(const sstring& ks_name) 
             co_return;
         }
 
-        // Stateful lambdas for round-robin shard assignment per node.
-        std::unordered_map<locator::host_id, std::function<shard_id()>> next_shard_for;
-        tm.for_each_token_owner([&] (const locator::node& node) {
-            auto host = node.host_id();
-            next_shard_for[host] = [num_shards = node.get_shard_count(), idx = 0u]() mutable {
-                return shard_id(idx++ % num_shards);
-            };
-        });
-
-        slogger.info("Building tablet maps for tables in keyspace {} with {} tablet(s)", ks_name, tablet_count);
-
         // Build a tablet_map from vnode token boundaries.
         //
         // The map contains one tablet per vnode. The replicas of each tablet are
@@ -4070,6 +4059,17 @@ future<> storage_service::prepare_for_tablets_migration(const sstring& ks_name) 
         // This map will serve as a template for per-table tablet map mutations.
         // Each table in the keyspace receives its own tablet map, but all maps
         // have identical tablet boundaries and replica placement.
+
+        slogger.info("Building tablet maps for tables in keyspace {} with {} tablet(s)", ks_name, tablet_count);
+
+        // Stateful lambdas for round-robin shard assignment per node.
+        std::unordered_map<locator::host_id, std::function<shard_id()>> next_shard_for;
+        tm.for_each_token_owner([&] (const locator::node& node) {
+            auto host = node.host_id();
+            next_shard_for[host] = [num_shards = node.get_shard_count(), idx = 0u]() mutable {
+                return shard_id(idx++ % num_shards);
+            };
+        });
 
         auto erm = ks.get_static_effective_replication_map();
 
