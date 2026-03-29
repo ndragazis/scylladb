@@ -4030,6 +4030,24 @@ future<> storage_service::prepare_for_tablets_migration(const sstring& ks_name) 
             }
         }
 
+        std::vector<std::pair<table_id, sstring>> tables_to_migrate;
+
+        for (const auto& [name, schema] : cf_meta_data) {
+            auto tid = schema->id();
+            auto& cf = db.find_column_family(tid);
+
+            if (cf.uses_tablets()) {
+                slogger.info("Table {}.{} already uses tablets, skipping", ks_name, name);
+                continue;
+            }
+            tables_to_migrate.push_back({tid, name});
+        }
+
+        if (tables_to_migrate.empty()) {
+            slogger.info("All tables in keyspace {} already use tablets, nothing to do", ks_name);
+            co_return;
+        }
+
         // Stateful lambdas for round-robin shard assignment per node.
         std::unordered_map<locator::host_id, std::function<shard_id()>> next_shard_for;
         tm.for_each_token_owner([&] (const locator::node& node) {
@@ -4067,24 +4085,6 @@ future<> storage_service::prepare_for_tablets_migration(const sstring& ks_name) 
             if (tmap.get_last_token(tablet) != sorted_tokens[i]) {
                 throw std::runtime_error(fmt::format("vnode token {} is not aligned; cannot be used as tablet boundary (expected: {})", sorted_tokens[i], tmap.get_last_token(tablet)));
             }
-        }
-
-        std::vector<std::pair<table_id, sstring>> tables_to_migrate;
-
-        for (const auto& [name, schema] : cf_meta_data) {
-            auto tid = schema->id();
-            auto& cf = db.find_column_family(tid);
-
-            if (cf.uses_tablets()) {
-                slogger.info("Table {}.{} already uses tablets, skipping", ks_name, name);
-                continue;
-            }
-            tables_to_migrate.push_back({tid, name});
-        }
-
-        if (tables_to_migrate.empty()) {
-            slogger.info("All tables in keyspace {} already use tablets, nothing to do", ks_name);
-            co_return;
         }
 
         // Build tablet map mutations for all tables and persist them to group0 (system.tablets)
