@@ -150,6 +150,46 @@ async def verify_migration_status(manager: ManagerClient, server: ServerInfo,
                 raise
 
 
+@pytest.mark.parametrize("aligned_last_token", [True, False],
+                         ids=["aligned", "unaligned"])
+@pytest.mark.asyncio
+async def test_migration_wrapping_tablet(manager: ManagerClient, aligned_last_token):
+    """Verify creation of extra tablet for wrap-around vnodes.
+
+    Tablets cannot wrap around the token ring as vnodes do; the last token of
+    the last tablet must always be MAX_TOKEN. So, when we build the tablet map,
+    if a wrap-around vnode exists (i.e., the last vnode token is not MAX_TOKEN),
+    it needs to be split into two tablets: (last_vnode_token, MAX_TOKEN] and
+    (MIN_TOKEN, first_vnode_token].
+    """
+    tokens = [-7686143364045646507, 0, 7158264828641642373] # some random tokens
+    if aligned_last_token:
+        tokens[-1] = MAX_TOKEN
+
+    initial_token = ", ".join(str(t) for t in tokens)
+    server = await manager.server_add(
+        cmdline=['--smp', '2'],
+        config={'initial_token': initial_token})
+    cql, _ = await manager.get_ready_cql([server])
+
+    vnode_boundaries = await get_all_vnode_tokens(cql)
+    assert vnode_boundaries == tokens, \
+        f"Expected vnode boundaries {tokens}, got {vnode_boundaries}"
+
+    async with new_test_keyspace(manager, "WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 1} AND tablets = {'enabled': false}") as ks:
+        await cql.run_async(f"CREATE TABLE {ks}.test (pk int PRIMARY KEY)")
+        await manager.api.create_vnode_tablet_migration(server.ip_addr, ks)
+
+        expected_tokens = tokens if tokens[-1] == MAX_TOKEN else tokens + [MAX_TOKEN]
+        tablet_replicas = await get_all_tablet_replicas(manager, server, ks, 'test')
+        tablet_tokens = sorted([tr.last_token for tr in tablet_replicas])
+
+        assert len(tablet_replicas) == len(expected_tokens), f"Expected {len(expected_tokens)} tablets, got {len(tablet_replicas)}"
+        assert tablet_tokens == expected_tokens, f"Expected tablet tokens {expected_tokens}, got {tablet_tokens}"
+
+        await manager.api.finalize_vnode_tablet_migration(server.ip_addr, ks)
+
+
 @pytest.mark.asyncio
 async def test_migration(manager: ManagerClient):
     """Verify vnodes-to-tablets migration for a single table on a single-node cluster.
