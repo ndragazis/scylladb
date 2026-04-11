@@ -92,6 +92,7 @@
 #include "replica/database.hh"
 #include "replica/tablets.hh"
 #include <seastar/core/metrics.hh>
+#include "cdc/cdc_options.hh"
 #include "cdc/generation.hh"
 #include "cdc/generation_service.hh"
 #include "repair/repair.hh"
@@ -4023,6 +4024,23 @@ future<> storage_service::prepare_for_tablets_migration(const sstring& ks_name) 
                 throw std::runtime_error(fmt::format("Another migration is in progress (node '{}' has intended storage mode '{}') - cannot start tablets migration."
                         " Please wait for the current migration to finish and retry.",
                         server_id, *replica_state.storage_mode));
+            }
+        }
+
+        // Validate that the keyspace does not contain features that are
+        // unsupported during vnodes-to-tablets migration.
+        if (!ks.metadata()->views().empty()) {
+            throw std::runtime_error(fmt::format("Cannot migrate keyspace {} to tablets: keyspace contains materialized views."
+                    " Drop all materialized views before starting the migration.", ks_name));
+        }
+        for (const auto& [name, schema] : cf_meta_data) {
+            if (schema->is_counter()) {
+                throw std::runtime_error(fmt::format("Cannot migrate keyspace {} to tablets: table {}.{} uses counters."
+                        " Counter tables are not supported during migration.", ks_name, ks_name, name));
+            }
+            if (schema->cdc_options().enabled()) {
+                throw std::runtime_error(fmt::format("Cannot migrate keyspace {} to tablets: table {}.{} has CDC enabled."
+                        " Disable CDC on all tables before starting the migration.", ks_name, ks_name, name));
             }
         }
 
