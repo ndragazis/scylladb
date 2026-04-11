@@ -61,6 +61,20 @@ future<> create_view_statement::check_access(query_processor& qp, const service:
     return state.has_column_family_access(keyspace(), _base_name.get_column_family(), auth::permission::ALTER);
 }
 
+void create_view_statement::validate(query_processor& qp, const service::client_state&) const {
+    auto& ks_meta = *qp.db().find_keyspace(keyspace()).metadata();
+    if (!ks_meta.uses_tablets()) {
+        auto tmptr = qp.proxy().get_token_metadata_ptr();
+        const auto& tablet_md = tmptr->tablets();
+        for (const auto& [name, s] : ks_meta.cf_meta_data()) {
+            if (tablet_md.has_tablet_map(s->id())) {
+                throw exceptions::invalid_request_exception(fmt::format(
+                        "Cannot create materialized view in keyspace {}: the keyspace is undergoing vnodes-to-tablets migration", keyspace()));
+            }
+        }
+    }
+}
+
 static const column_definition* get_column_definition(const schema& schema, column_identifier::raw& identifier) {
     auto prepared = identifier.prepare(schema);
     throwing_assert(dynamic_pointer_cast<column_identifier>(prepared));
@@ -152,7 +166,8 @@ std::pair<view_ptr, cql3::cql_warnings_vec> create_view_statement::prepare_view(
         throw exceptions::invalid_request_exception(e.what());
     }
 
-    if (db.find_keyspace(keyspace()).uses_tablets()) {
+    auto& ks_meta = *db.find_keyspace(keyspace()).metadata();
+    if (ks_meta.uses_tablets()) {
         warnings.emplace_back(
             "Creating a materialized view in a keyspaces that uses tablets requires "
             "the keyspace to remain RF-rack-valid while the materialized view exists. "
