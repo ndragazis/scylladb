@@ -24,6 +24,7 @@
 #include "auth/service.hh"
 #include "schema/schema_builder.hh"
 #include "data_dictionary/data_dictionary.hh"
+#include "data_dictionary/keyspace_metadata.hh"
 #include "service/raft/raft_group0_client.hh"
 #include "types/user.hh"
 #include "gms/feature_service.hh"
@@ -59,6 +60,20 @@ create_table_statement::create_table_statement(cf_name name,
 
 future<> create_table_statement::check_access(query_processor& qp, const service::client_state& state) const {
     return state.has_keyspace_access(keyspace(), auth::permission::CREATE);
+}
+
+void create_table_statement::validate(query_processor& qp, const service::client_state&) const {
+    auto& ks_meta = *qp.db().find_keyspace(keyspace()).metadata();
+    if (!ks_meta.uses_tablets()) {
+        auto tmptr = qp.proxy().get_token_metadata_ptr();
+        const auto& tablet_md = tmptr->tablets();
+        for (const auto& [name, s] : ks_meta.cf_meta_data()) {
+            if (tablet_md.has_tablet_map(s->id())) {
+                throw exceptions::invalid_request_exception(fmt::format(
+                        "Cannot create table in keyspace {}: the keyspace is undergoing vnodes-to-tablets migration", keyspace()));
+            }
+        }
+    }
 }
 
 // Column definitions
