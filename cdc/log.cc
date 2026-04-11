@@ -200,6 +200,19 @@ public:
             }
 
             auto& db = _ctxt._proxy.get_db().local();
+
+            // Block enabling CDC in a keyspace undergoing vnodes-to-tablets migration.
+            if (!ksm.uses_tablets()) {
+                const auto& tablet_md = db.get_token_metadata().tablets();
+                for (const auto& [name, s] : ksm.cf_meta_data()) {
+                    if (tablet_md.has_tablet_map(s->id())) {
+                        throw exceptions::invalid_request_exception(fmt::format(
+                                "Cannot enable CDC on table {}.{}: the keyspace is undergoing"
+                                " vnodes-to-tablets migration", schema.ks_name(), schema.cf_name()));
+                    }
+                }
+            }
+
             auto logname = log_name(schema.cf_name());
             check_that_cdc_log_table_does_not_exist(db, schema, logname);
             ensure_that_table_has_no_counter_columns(schema);
@@ -235,6 +248,22 @@ public:
             auto& db = _ctxt._proxy.get_db().local();
             auto logname = log_name(old_schema.cf_name());
             auto& keyspace = db.find_keyspace(old_schema.ks_name());
+
+            // Block enabling CDC in a keyspace undergoing vnodes-to-tablets migration.
+            if (!was_cdc) {
+                auto& ks_meta = *keyspace.metadata();
+                if (!ks_meta.uses_tablets()) {
+                    const auto& tablet_md = db.get_token_metadata().tablets();
+                    for (const auto& [name, s] : ks_meta.cf_meta_data()) {
+                        if (tablet_md.has_tablet_map(s->id())) {
+                            throw exceptions::invalid_request_exception(fmt::format(
+                                    "Cannot enable CDC on table {}.{}: the keyspace is undergoing"
+                                    " vnodes-to-tablets migration", old_schema.ks_name(), old_schema.cf_name()));
+                        }
+                    }
+                }
+            }
+
             auto has_cdc_log = db.has_schema(old_schema.ks_name(), logname);
             auto log_schema = has_cdc_log ? db.find_schema(old_schema.ks_name(), logname) : nullptr;
 

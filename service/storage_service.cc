@@ -2745,6 +2745,27 @@ static size_t count_normal_token_owners(const topology& topology) {
     });
 }
 
+// Check if any non-system keyspace is undergoing vnodes-to-tablets migration.
+// A keyspace is migrating if it does not use tablets but at least one of its
+// tables has a tablet map in the tablet metadata.
+static void check_no_tablets_migration_in_progress(const replica::database& db, const sstring& operation) {
+    const auto& tablet_md = db.get_token_metadata().tablets();
+    for (const auto& ks_name : db.get_non_system_keyspaces()) {
+        auto& ks = db.find_keyspace(ks_name);
+        if (!ks.uses_tablets()) {
+            for (const auto& schema : ks.metadata()->tables()) {
+                if (tablet_md.has_tablet_map(schema->id())) {
+                    throw std::runtime_error(fmt::format(
+                            "Cannot {} while vnodes-to-tablets migration is in progress"
+                            " (keyspace '{}' is being migrated)."
+                            " Complete or roll back the migration first.",
+                            operation, ks_name));
+                }
+            }
+        }
+    }
+}
+
 future<> storage_service::raft_decommission() {
     auto& raft_server = _group0->group0_server();
     auto holder = _group0->hold_group0_gate();
@@ -2752,6 +2773,8 @@ future<> storage_service::raft_decommission() {
 
     while (true) {
         auto guard = co_await _group0->client().start_operation(_group0_as, raft_timeout{});
+
+        check_no_tablets_migration_in_progress(_db.local(), "decommission");
 
         auto it = _topology_state_machine._topology.find(raft_server.id());
         if (!it) {
@@ -2854,6 +2877,8 @@ future<> storage_service::raft_removenode(locator::host_id host_id, locator::hos
 
     while (true) {
         auto guard = co_await _group0->client().start_operation(_group0_as, raft_timeout{});
+
+        check_no_tablets_migration_in_progress(_db.local(), "removenode");
 
         auto it = _topology_state_machine._topology.find(id);
 
@@ -3393,6 +3418,8 @@ future<> storage_service::raft_rebuild(utils::optional_param sdc_param) {
 
     while (true) {
         auto guard = co_await _group0->client().start_operation(_group0_as, raft_timeout{});
+
+        check_no_tablets_migration_in_progress(_db.local(), "rebuild");
 
         auto it = _topology_state_machine._topology.find(raft_server.id());
         if (!it) {
@@ -5976,6 +6003,26 @@ future<join_node_request_result> storage_service::join_node_request_handler(join
 
     while (true) {
         auto guard = co_await _group0->client().start_operation(_group0_as, raft_timeout{});
+
+        // Block node join while vnodes-to-tablets migration is in progress.
+        {
+            const auto& tablet_md = _db.local().get_token_metadata().tablets();
+            for (const auto& ks_name : _db.local().get_non_system_keyspaces()) {
+                auto& ks = _db.local().find_keyspace(ks_name);
+                if (!ks.uses_tablets()) {
+                    for (const auto& schema : ks.metadata()->tables()) {
+                        if (tablet_md.has_tablet_map(schema->id())) {
+                            result.result = join_node_request_result::rejected{
+                                .reason = fmt::format("Cannot join node: vnodes-to-tablets migration is in progress"
+                                        " (keyspace '{}' is being migrated)."
+                                        " Complete or roll back the migration first.", ks_name),
+                            };
+                            co_return result;
+                        }
+                    }
+                }
+            }
+        }
 
         if (const auto *p = _topology_state_machine._topology.find(params.host_id)) {
             const auto& rs = p->second;

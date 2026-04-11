@@ -6857,6 +6857,24 @@ future<bool> storage_proxy::cas(schema_ptr schema, cas_shard cas_shard, cas_requ
         clock_type::time_point write_timeout, clock_type::time_point cas_timeout, bool write, cdc::per_request_options cdc_opts) {
 
     auto& table = local_db().find_column_family(schema->id());
+
+    // Block LWT on tables in a keyspace undergoing vnodes-to-tablets migration.
+    // During migration, some nodes use system.paxos (vnodes) while others use
+    // per-table paxos state tables (tablets), leading to split-brain paxos state.
+    {
+        auto& ks = local_db().find_keyspace(schema->ks_name());
+        if (!ks.uses_tablets()) {
+            const auto& tablet_md = local_db().get_token_metadata().tablets();
+            for (const auto& [name, s] : ks.metadata()->cf_meta_data()) {
+                if (tablet_md.has_tablet_map(s->id())) {
+                    co_await coroutine::return_exception(exceptions::invalid_request_exception(fmt::format(
+                            "Cannot use LightWeight Transactions on table {}.{}: the keyspace is undergoing"
+                            " vnodes-to-tablets migration", schema->ks_name(), schema->cf_name())));
+                }
+            }
+        }
+    }
+
     if (table.uses_tablets()) {
         if (!_features.lwt_with_tablets) {
             auto msg = format("Cannot use LightWeight Transactions for table {}.{}: LWT is not yet supported with tablets", schema->ks_name(), schema->cf_name());
