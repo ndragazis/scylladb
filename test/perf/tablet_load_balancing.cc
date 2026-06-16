@@ -9,6 +9,9 @@
 #include <fmt/ranges.h>
 #include <bit>
 
+#include <boost/algorithm/string/split.hpp>
+#include <boost/algorithm/string/trim_all.hpp>
+
 #include <seastar/core/sharded.hh>
 #include <seastar/core/app-template.hh>
 #include <seastar/core/sstring.hh>
@@ -711,6 +714,165 @@ void run_add_dec(const bpo::variables_map& opts) {
     }
 }
 
+void show_migration_target_pow2s(const bpo::variables_map& opts) {
+    const int nr_racks = opts["racks"].as<int>();
+    const int nodes_per_rack = opts["nodes-per-rack"].as<int>();
+    const shard_id shards_per_node = static_cast<shard_id>(opts["shards"].as<int>());
+    const int rf = opts["rf"].as<int>();
+
+    // Parse table sizes from --logical-table-sizes-gb or --logical-table-size-gb.
+    // The former is a comma-separated list of sizes, the latter is a single common
+    // size for all tables.
+    std::vector<uint64_t> table_sizes;
+    const auto sizes_str = opts["logical-table-sizes-gb"].as<std::string>();
+    if (!sizes_str.empty()) {
+        std::vector<sstring> tokens;
+        boost::split(tokens, sizes_str, boost::is_any_of(","));
+        table_sizes.reserve(tokens.size());
+        for (auto& token : tokens) {
+            boost::trim_all(token);
+            table_sizes.push_back(uint64_t(std::stoul(token)) << 30);
+        }
+    } else {
+        table_sizes.assign(opts["tables"].as<int>(), uint64_t(opts["logical-table-size-gb"].as<int>()) << 30);
+    }
+    const int nr_tables = static_cast<int>(table_sizes.size());
+
+    auto cfg = tablet_cql_test_config();
+    if (opts.count("tablets-initial-scale-factor")) {
+        cfg.db_config->tablets_initial_scale_factor(opts["tablets-initial-scale-factor"].as<double>());
+    }
+    if (opts.count("tablets-per-shard-goal")) {
+        cfg.db_config->tablets_per_shard_goal(static_cast<unsigned>(opts["tablets-per-shard-goal"].as<int>()));
+    }
+    if (opts.count("target-tablet-size-in-bytes")) {
+        cfg.db_config->target_tablet_size_in_bytes(static_cast<uint64_t>(opts["target-tablet-size-in-bytes"].as<int>()));
+    }
+
+    do_with_cql_env_thread([&] (auto& e) {
+        // Build topology.
+        topology_builder topo(e);
+        for (int r = 0; r < nr_racks; ++r) {
+            if (r > 0) {
+                topo.start_new_rack();
+            }
+            for (int n = 0; n < nodes_per_rack; ++n) {
+                topo.add_node(service::node_state::normal, shards_per_node);
+            }
+        }
+
+        // Create vnode-based keyspace and tables.
+        const auto ks_name = sstring("ks_vnodes");
+        e.execute_cql(fmt::format(
+                "create keyspace {} with replication = {{'class': 'NetworkTopologyStrategy', '{}': {}}}"
+                " and tablets = {{'enabled': false}}",
+                ks_name, topo.dc(), rf)).get();
+
+        std::vector<table_id> table_ids;
+        table_ids.reserve(nr_tables);
+        for (int t = 0; t < nr_tables; ++t) {
+            const auto tname = fmt::format("t{}", t);
+            e.execute_cql(fmt::format("create table {}.{} (pk int primary key)", ks_name, tname)).get();
+            table_ids.push_back(e.local_db().find_schema(ks_name, tname)->id());
+        }
+
+        // Get the tablet-aware replication strategy from the vnode-based keyspace.
+        auto& ks = e.local_db().find_keyspace(ks_name);
+        auto* trs = dynamic_cast<const locator::tablet_aware_replication_strategy*>(&ks.get_replication_strategy());
+        if (!trs) {
+            throw std::runtime_error("Keyspace does not have a tablet-aware replication strategy");
+        }
+
+        // Compute target pow2s for vnodes-to-tablets migration.
+        service::size_per_table_map sizes;
+        for (int i = 0; i < nr_tables; ++i) {
+            sizes[table_ids[i]] = table_sizes[i];
+        }
+        auto target_pow2s = e.get_tablet_allocator().local().compute_migration_target_pow2s(trs, sizes).get();
+
+        // Print results.
+        const int total_nodes = nr_racks * nodes_per_rack;
+        const int total_shards = total_nodes * static_cast<int>(shards_per_node);
+
+        fmt::print("\n");
+        fmt::print("Topology:  {} rack(s) x {} node(s)/rack x {} shard(s)/node, RF={}\n",
+                   nr_racks, nodes_per_rack, shards_per_node, rf);
+        fmt::print("Config:    tablets_initial_scale_factor={}, tablets_per_shard_goal={}\n",
+                   cfg.db_config->tablets_initial_scale_factor(),
+                   cfg.db_config->tablets_per_shard_goal());
+        fmt::print("Tables:    {}\n", nr_tables);
+        fmt::print("\n");
+
+        // Pre-format all row values to compute the max width per column.
+        struct row {
+            sstring table;
+            sstring size_gb;
+            sstring target_pow2;
+            sstring avg_tablet_size_gb;
+            sstring replicas_per_shard;
+        };
+
+        std::vector<row> rows;
+        rows.reserve(nr_tables);
+        double aggregate_replicas_per_shard = 0;
+        for (int i = 0; i < nr_tables; ++i) {
+            const uint64_t size = table_sizes[i];
+            const auto it = target_pow2s.find(table_ids[i]);
+            if (it == target_pow2s.end()) {
+                rows.push_back({fmt::format("t{}", i), fmt::format("{}", size >> 30), "N/A", "N/A", "N/A"});
+                continue;
+            }
+            const size_t pow2 = it->second;
+            const double replicas_per_shard = double(pow2 * rf) / total_shards;
+            const double avg_tablet_size = double(size) / pow2 / (1u << 30);
+            aggregate_replicas_per_shard += replicas_per_shard;
+            rows.push_back({
+                fmt::format("t{}", i),
+                fmt::format("{}", size >> 30),
+                fmt::format("{}", pow2),
+                fmt::format("{:.2f}", avg_tablet_size),
+                fmt::format("{:.2f}", replicas_per_shard),
+            });
+        }
+
+        // Column headers.
+        const sstring H_TABLE = "table";
+        const sstring H_SIZE = "size (GiB)";
+        const sstring H_POW2 = "target pow2";
+        const sstring H_AVG = "avg tablet size (GiB)";
+        const sstring H_RPS = "replicas/shard";
+
+        // Compute column widths: max(header width, max data width).
+        auto w_t = H_TABLE.size();
+        auto w_size = H_SIZE.size();
+        auto w_pow2 = H_POW2.size();
+        auto w_avg = H_AVG.size();
+        auto w_rps = H_RPS.size();
+        for (const auto& r : rows) {
+            w_t = std::max(w_t, r.table.size());
+            w_size = std::max(w_size, r.size_gb.size());
+            w_pow2 = std::max(w_pow2, r.target_pow2.size());
+            w_avg = std::max(w_avg, r.avg_tablet_size_gb.size());
+            w_rps = std::max(w_rps, r.replicas_per_shard.size());
+        }
+
+        // Print per-table results as an aligned table.
+        fmt::print("  Per-table results:\n\n");
+        fmt::print("    {:<{}}   {:>{}}   {:>{}}   {:>{}}   {:>{}}\n",
+                H_TABLE, w_t, H_SIZE, w_size, H_POW2, w_pow2, H_AVG, w_avg, H_RPS, w_rps);
+        fmt::print("    {:-<{}}   {:-<{}}   {:-<{}}   {:-<{}}   {:-<{}}\n",
+                "", w_t, "", w_size, "", w_pow2, "", w_avg, "", w_rps);
+        for (const auto& row : rows) {
+            fmt::print("    {:<{}}   {:>{}}   {:>{}}   {:>{}}   {:>{}}\n",
+                    row.table, w_t, row.size_gb, w_size, row.target_pow2, w_pow2,
+                    row.avg_tablet_size_gb, w_avg, row.replicas_per_shard, w_rps);
+        }
+        fmt::print("\n");
+        fmt::print("  Aggregate tablet replicas per shard:  {:.2f}\n", aggregate_replicas_per_shard);
+        fmt::print("\n");
+    }, cfg).get();
+}
+
 using operation_func = std::function<void(const bpo::variables_map&)>;
 
 const std::vector<operation_option> global_options {};
@@ -747,6 +909,23 @@ const std::map<operation, operation_func> operations_with_func{
             typed_option<double>("tablet-size-deviation-factor", 0.5, "Deviation factor for the tablet size random generator.")
           }
         }, &test_parallel_scaleout},
+
+        {{"migration-target-pow2s",
+         "Show target pow2 tablet counts for a list of tables migrating from vnodes to tablets",
+         "",
+         {
+            typed_option<int>("racks", 3, "Number of racks in the DC."),
+            typed_option<int>("nodes-per-rack", 3, "Nodes per rack."),
+            typed_option<int>("shards", 8, "Shards per node."),
+            typed_option<int>("rf", 3, "Replication factor (single DC, numeric)."),
+            typed_option<int>("tables", 1, "Number of migrating tables."),
+            typed_option<int>("logical-table-size-gb", 0, "Size of unique data per table in GiB (0 = empty)."),
+            typed_option<std::string>("logical-table-sizes-gb", "", "Comma-separated list of logical table sizes in GiB. When provided, overrides --tables and --logical-table-size-gb."),
+            typed_option<double>("tablets-initial-scale-factor", "tablets_initial_scale_factor (default: from scylla config)."),
+            typed_option<int>("target-tablet-size-in-bytes", "target_tablet_size_in_bytes (default: from scylla config)."),
+            typed_option<int>("tablets-per-shard-goal",  "tablets_per_shard_goal (default: from scylla config)."),
+          }
+        }, &show_migration_target_pow2s},
     }
 };
 
