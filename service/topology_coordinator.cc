@@ -434,6 +434,310 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
         return service::topology::parse_replaced_node(req_param);
     }
 
+    bool is_migrating_table(table_id table) const {
+        auto t = _db.get_tables_metadata().get_table_if_exists(table);
+        if (!t) {
+            return false;
+        }
+        const auto& ks = _db.find_keyspace(t->schema()->ks_name());
+        return !ks.get_replication_strategy().uses_tablets();
+    }
+
+    bool has_migrating_tablet_replicas(locator::host_id host) const {
+        const auto& tmd = get_token_metadata_ptr()->tablets();
+        for (const auto& group : tmd.all_table_groups()) {
+            auto table = group.first;
+            if (!is_migrating_table(table)) {
+                continue;
+            }
+            const auto& tmap = tmd.get_tablet_map(table);
+            for (auto tablet : tmap.tablet_ids()) {
+                const auto& tinfo = tmap.get_tablet_info(tablet);
+                if (std::ranges::any_of(tinfo.replicas, [host] (const locator::tablet_replica& r) { return r.host == host; })) {
+                    return true;
+                }
+                if (const auto* trinfo = tmap.get_tablet_transition_info(tablet)) {
+                    if (std::ranges::any_of(trinfo->next, [host] (const locator::tablet_replica& r) { return r.host == host; })) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    void validate_migrating_tablet_replace_shards(const replica_state& replacing, const replica_state& replaced) const {
+        if (replacing.shard_count != replaced.shard_count || replacing.ignore_msb != replaced.ignore_msb) {
+            throw std::runtime_error(fmt::format(
+                    "Cannot replace a node with migrating tablet maps using a different shard configuration: "
+                    "replacing shard_count={}, ignore_msb={}; replaced shard_count={}, ignore_msb={}",
+                    replacing.shard_count, replacing.ignore_msb, replaced.shard_count, replaced.ignore_msb));
+        }
+    }
+
+    std::optional<locator::tablet_replica_set> replace_replica_host(
+            const locator::tablet_replica_set& replicas,
+            locator::host_id old_host,
+            locator::host_id new_host) const {
+        locator::tablet_replica_set result;
+        result.reserve(replicas.size());
+        bool replaced = false;
+        for (auto r : replicas) {
+            if (r.host == old_host) {
+                r.host = new_host;
+                replaced = true;
+            }
+            result.push_back(r);
+        }
+        if (!replaced) {
+            return std::nullopt;
+        }
+        return result;
+    }
+
+    template<typename BuildTableUpdates>
+    future<> append_replace_tablet_updates_chunked(utils::chunked_vector<canonical_mutation>& updates,
+            locator::host_id replaced_host,
+            locator::host_id replacing_host,
+            size_t max_mutation_bytes,
+            const char* operation_name,
+            BuildTableUpdates&& build_table_updates) const {
+        size_t updates_size_bytes = 0;
+        for (const auto& m : updates) {
+            updates_size_bytes += m.representation().size_bytes();
+        }
+
+        const auto& tmd = get_token_metadata_ptr()->tablets();
+        for (const auto& group : tmd.all_table_groups()) {
+            auto table = group.first;
+            if (!is_migrating_table(table)) {
+                continue;
+            }
+
+            utils::chunked_vector<canonical_mutation> table_updates;
+            size_t table_updates_size_bytes = 0;
+            const auto& tmap = tmd.get_tablet_map(table);
+            co_await build_table_updates(
+                    table,
+                    tmap,
+                    replaced_host,
+                    replacing_host,
+                    table_updates,
+                    table_updates_size_bytes);
+
+            if (table_updates.empty()) {
+                continue;
+            }
+
+            if (updates_size_bytes + table_updates_size_bytes > max_mutation_bytes) {
+                if (updates.empty()) {
+                    throw std::runtime_error(fmt::format(
+                            "{}: tablet map update for table {} is too large for one command: {} bytes exceed limit {}",
+                            operation_name, table, table_updates_size_bytes, max_mutation_bytes));
+                }
+                co_return;
+            }
+
+            updates_size_bytes += table_updates_size_bytes;
+            for (auto& m : table_updates) {
+                updates.emplace_back(std::move(m));
+            }
+
+            co_await coroutine::maybe_yield();
+        }
+    }
+
+    enum class replace_tablets_phase {
+        write_both_read_old,
+        write_both_read_new,
+        finalize,
+    };
+
+    future<> generate_vnodes_to_tablets_replace_updates(utils::chunked_vector<canonical_mutation>& updates,
+            api::timestamp_type ts,
+            locator::host_id replaced_host,
+            locator::host_id replacing_host,
+            session_id session,
+            replace_tablets_phase phase,
+            size_t max_mutation_bytes) const {
+        static constexpr auto transition_kind = locator::tablet_transition_kind::rebuild;
+        auto build_table_updates = [&] (table_id table,
+                const locator::tablet_map& tmap,
+                locator::host_id replaced,
+                locator::host_id replacing,
+                utils::chunked_vector<canonical_mutation>& table_updates,
+                size_t& table_updates_size_bytes) -> future<> {
+            for (auto tablet : tmap.tablet_ids()) {
+                const auto& tinfo = tmap.get_tablet_info(tablet);
+                auto next = replace_replica_host(tinfo.replicas, replaced, replacing);
+                if (!next) {
+                    continue;
+                }
+                const auto* trinfo = tmap.get_tablet_transition_info(tablet);
+                auto last_token = tmap.get_last_token(tablet);
+                auto builder = replica::tablet_mutation_builder(ts, table);
+                switch (phase) {
+                case replace_tablets_phase::finalize: {
+                    if (!trinfo || trinfo->transition != transition_kind || trinfo->next != *next || trinfo->session_id != session) {
+                        continue;
+                    }
+                    auto mut = canonical_mutation(builder
+                            .set_replicas(last_token, std::move(*next))
+                            .del_transition(last_token)
+                            .build());
+                    table_updates_size_bytes += mut.representation().size_bytes();
+                    table_updates.emplace_back(std::move(mut));
+                    break;
+                }
+                case replace_tablets_phase::write_both_read_new: {
+                    if (!trinfo || trinfo->transition != transition_kind || trinfo->next != *next || trinfo->session_id != session) {
+                        continue;
+                    }
+                    if (trinfo->stage == locator::tablet_transition_stage::write_both_read_new) {
+                        continue;
+                    }
+                    auto mut = canonical_mutation(builder
+                            .set_stage(last_token, locator::tablet_transition_stage::write_both_read_new)
+                            .del_session(last_token)
+                            .build());
+                    table_updates_size_bytes += mut.representation().size_bytes();
+                    table_updates.emplace_back(std::move(mut));
+                    break;
+                }
+                case replace_tablets_phase::write_both_read_old: {
+                    if (trinfo && trinfo->transition == transition_kind && trinfo->next == *next && trinfo->session_id == session && trinfo->stage == locator::tablet_transition_stage::write_both_read_old) {
+                        continue;
+                    }
+                    auto mut = canonical_mutation(builder
+                            .set_new_replicas(last_token, std::move(*next))
+                            .set_stage(last_token, locator::tablet_transition_stage::write_both_read_old)
+                            .set_transition(last_token, transition_kind)
+                            .set_session(last_token, session)
+                            .build());
+                    table_updates_size_bytes += mut.representation().size_bytes();
+                    table_updates.emplace_back(std::move(mut));
+                    break;
+                }
+                default:
+                    on_internal_error(rtlogger, "unexpected replace_tablets_phase in generate_vnodes_to_tablets_replace_updates");
+                }
+            }
+
+            co_return;
+        };
+
+        co_await append_replace_tablet_updates_chunked(
+                updates,
+                replaced_host,
+                replacing_host,
+                max_mutation_bytes,
+                "replace",
+                build_table_updates);
+    }
+
+    future<node_to_work_on> apply_vnodes_to_tablets_replace_updates(
+            node_to_work_on node,
+            raft::server_id replaced_node_id,
+        replace_tablets_phase phase) {
+        const size_t max_command_size = _raft.max_command_size();
+        const size_t mutation_size_threshold = max_command_size / 2;
+
+        const auto replaced_host = locator::host_id(replaced_node_id.uuid());
+        const auto replacing_host = locator::host_id(node.id.uuid());
+
+        bool did_commit = false;
+        while (true) {
+            utils::chunked_vector<canonical_mutation> updates;
+            co_await generate_vnodes_to_tablets_replace_updates(
+                    updates,
+                    node.guard.write_timestamp(),
+                    replaced_host,
+                    replacing_host,
+                    _topo_sm._topology.session,
+                    phase,
+                    mutation_size_threshold);
+
+            if (updates.empty()) {
+                break;
+            }
+
+            updates.emplace_back(topology_mutation_builder(node.guard.write_timestamp())
+                    .set_version(_topo_sm._topology.version + 1)
+                    .build());
+
+            auto node_id = node.id;
+            co_await update_topology_state(
+                    take_guard(std::move(node)),
+                    std::move(updates),
+                    std::invoke([phase] () -> const sstring& {
+                        static const sstring start_reason = "replace: start migrating tablet map replacement transitions";
+                        static const sstring switch_reads_reason = "replace: switch migrating tablet map replacement transitions to write_both_read_new";
+                        static const sstring finalize_reason = "replace: finalize migrating tablet map replacement transitions";
+                        switch (phase) {
+                        case replace_tablets_phase::write_both_read_old:
+                            return start_reason;
+                        case replace_tablets_phase::write_both_read_new:
+                            return switch_reads_reason;
+                        case replace_tablets_phase::finalize:
+                            return finalize_reason;
+                        }
+                        on_internal_error(rtlogger, "unexpected replace_tablets_phase");
+                    }));
+            did_commit = true;
+            node = retake_node(co_await start_operation(), node_id);
+        }
+
+        if (did_commit && phase == replace_tablets_phase::write_both_read_old) {
+            auto node_id = node.id;
+            node = retake_node(
+                    co_await global_tablet_token_metadata_barrier(take_guard(std::move(node))),
+                    node_id);
+        }
+
+        co_return node;
+    }
+
+    future<> prepare_migrating_tablet_replace_rollback(utils::chunked_vector<canonical_mutation>& updates,
+            api::timestamp_type ts,
+            locator::host_id replaced_host,
+            locator::host_id replacing_host,
+            size_t max_mutation_bytes) const {
+        static constexpr auto transition_kind = locator::tablet_transition_kind::rebuild;
+        auto build_table_updates = [&] (table_id table,
+                const locator::tablet_map& tmap,
+                locator::host_id replaced,
+                locator::host_id replacing,
+                utils::chunked_vector<canonical_mutation>& table_updates,
+                size_t& table_updates_size_bytes) -> future<> {
+            for (auto tablet : tmap.tablet_ids()) {
+                const auto* trinfo = tmap.get_tablet_transition_info(tablet);
+                if (!trinfo || trinfo->transition != transition_kind) {
+                    continue;
+                }
+                const auto& tinfo = tmap.get_tablet_info(tablet);
+                auto expected_next = replace_replica_host(tinfo.replicas, replaced, replacing);
+                if (!expected_next || *expected_next != trinfo->next) {
+                    continue;
+                }
+                auto mut = canonical_mutation(replica::tablet_mutation_builder(ts, table)
+                        .del_transition(tmap.get_last_token(tablet))
+                        .build());
+                table_updates_size_bytes += mut.representation().size_bytes();
+                table_updates.emplace_back(std::move(mut));
+            }
+
+                co_return;
+        };
+
+        co_await append_replace_tablet_updates_chunked(
+                updates,
+                replaced_host,
+                replacing_host,
+                max_mutation_bytes,
+                "replace rollback",
+                build_table_updates);
+    }
+
     future<> exec_direct_command_helper(raft::server_id id, uint64_t cmd_index, raft_topology_cmd cmd) {
         rtlogger.debug("send {} command with term {} and index {} to {}",
             cmd.cmd, _term, cmd_index, id);
@@ -3149,6 +3453,10 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                     format("Node {} being replaced by {} is not in normal state", replaced_id, node.id));
                         }
 
+                        if (has_migrating_tablet_replicas(locator::host_id(replaced_id.uuid()))) {
+                            validate_migrating_tablet_replace_shards(*node.rs, it->second);
+                        }
+
                         topology_mutation_builder builder(node.guard.write_timestamp());
 
                         // If a zero-token node is replacing another zero-token node,
@@ -3181,7 +3489,8 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                                .set_version(_topo_sm._topology.version + 1)
                                .set_session(session_id(guard.new_group0_state_id()))
                                .with_node(node.id)
-                               .set("tokens", it->second.ring->tokens);
+                               .set("tokens", it->second.ring->tokens)
+                               .del("intended_storage_mode");
                         co_await update_topology_state(std::move(guard), {builder.build()},
                                 "replace: transition to write_both_read_old and take ownership of the replaced node's tokens");
                     }
@@ -3371,6 +3680,10 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                         co_await _voter_handler.on_node_removed(replaced_node_id, _as);
                     }
                 }
+                if (node.rs->state == node_state::replacing) {
+                    auto replaced_node_id = parse_replaced_node(node.req_param);
+                    node = co_await apply_vnodes_to_tablets_replace_updates(std::move(node), replaced_node_id, replace_tablets_phase::write_both_read_old);
+                }
                 utils::get_local_injector().inject("crash_coordinator_before_stream", [] { 
                     rtlogger.info("crash_coordinator_before_stream: aborting");
                     abort(); 
@@ -3408,6 +3721,11 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
 
                 co_await utils::get_local_injector().inject("topology_coordinator/write_both_read_old/before_version_increment",
                     utils::wait_for_message(std::chrono::minutes(5)));
+
+                if (node.rs->state == node_state::replacing) {
+                    auto replaced_node_id = parse_replaced_node(node.req_param);
+                    node = co_await apply_vnodes_to_tablets_replace_updates(std::move(node), replaced_node_id, replace_tablets_phase::write_both_read_new);
+                }
 
                 // Streaming completed. We can now move tokens state to topology::transition_state::write_both_read_new
                 topology_mutation_builder builder(node.guard.write_timestamp());
@@ -3515,6 +3833,8 @@ class topology_coordinator : public endpoint_lifecycle_subscriber
                 case node_state::replacing: {
                     auto replaced_node_id = parse_replaced_node(node.req_param);
                     node = retake_node(co_await remove_from_group0(std::move(node.guard), replaced_node_id), node.id);
+
+                    node = co_await apply_vnodes_to_tablets_replace_updates(std::move(node), replaced_node_id, replace_tablets_phase::finalize);
 
                     utils::chunked_vector<canonical_mutation> muts;
 
@@ -4728,6 +5048,31 @@ future<> topology_coordinator::rollback_current_topology_op(group0_guard&& guard
             break;
         default:
             on_internal_error(rtlogger, fmt::format("tried to rollback in unsupported state {}", node.rs->state));
+    }
+
+    if (node.rs->state == node_state::replacing) {
+        const size_t max_command_size = _raft.max_command_size();
+        const size_t mutation_size_threshold = max_command_size / 2;
+        auto replaced_node_id = parse_replaced_node(node.req_param);
+        while (true) {
+            utils::chunked_vector<canonical_mutation> rollback_muts;
+            co_await prepare_migrating_tablet_replace_rollback(
+                    rollback_muts,
+                    node.guard.write_timestamp(),
+                    locator::host_id(replaced_node_id.uuid()),
+                    locator::host_id(node.id.uuid()),
+                    mutation_size_threshold);
+            if (rollback_muts.empty()) {
+                break;
+            }
+
+            auto node_id = node.id;
+            co_await update_topology_state(
+                    take_guard(std::move(node)),
+                    std::move(rollback_muts),
+                    "replace rollback: clear migrating tablet map replacement transitions");
+            node = retake_node(co_await start_operation(), node_id);
+        }
     }
 
     topology_mutation_builder builder(node.guard.write_timestamp());
