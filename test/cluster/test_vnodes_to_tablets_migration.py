@@ -1061,7 +1061,6 @@ async def test_tablet_status_in_migration_api(manager: ManagerClient):
                 f"Tablet count {tablet_count} for table {t['table']} is not a power of two"
 
 
-@pytest.mark.asyncio
 async def test_pow2_convergence_virtual_task(manager: ManagerClient):
     """Verify that pow2 convergence is tracked via a virtual task.
 
