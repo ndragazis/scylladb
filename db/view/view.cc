@@ -2986,9 +2986,11 @@ void view_builder::init_virtual_table() {
                 std::move(permit),
                 pr, ps, trace_state, fwd_mr);
 
-        auto& sharder_v1 = s->get_sharder();
-        auto filter_fn = [&sharder_v1, shard_id = this_shard_id()] (const dht::decorated_key& dk) {
-            return sharder_v1.shard_for_reads(dk.token()) == shard_id;
+        // Take the sharder from the replication map rather than from the schema:
+        // the static schema sharder does not exist when the table uses tablets.
+        auto erm_v1 = _db.find_column_family(s->id()).get_effective_replication_map();
+        auto filter_fn = [erm_v1 = std::move(erm_v1), s, shard_id = this_shard_id()] (const dht::decorated_key& dk) {
+            return erm_v1->shard_for_reads(*s, dk.token()) == shard_id;
         };
 
         return make_filtering_reader(std::move(ms_reader), std::move(filter_fn));
