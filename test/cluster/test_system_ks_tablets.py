@@ -17,7 +17,8 @@ from test.cluster.system_ks_tablets_util import (
     SYSTEM_KS_TABLES, maintenance_session, table_ids, keyspace_uses_tablets, tablets_ks_options,
     wait_for_tables, traced_query, audited_statement, read_system_distributed, row_count,
     assert_survives_rolling_restart, enable_trace_and_audit_probes, AUDIT_PROBE_KS,
-    replication_class, repair_on_all_nodes, check_keyspace_works, migrate_to_tablets)
+    replication_class, repair_on_all_nodes, check_keyspace_works, migrate_to_tablets,
+    restore_from_snapshot)
 from test.cluster.util import new_test_keyspace, reconnect_driver
 from test.pylib.scylla_cluster_manager import ScyllaClusterManager
 from test.pylib.util import wait_for
@@ -230,3 +231,30 @@ async def test_migrate_system_ks_to_tablets(manager: ScyllaClusterManager, ks: s
     assert_no_rows_lost(before, await row_counts(cql, ks))
     await assert_survives_rolling_restart(manager, servers, ks, old_ids)
 
+
+@pytest.mark.prepare_3_racks_cluster
+@pytest.mark.parametrize("ks", ["system_traces", "audit", "system_distributed"])
+async def test_snapshot_drop_recreate_restore(manager: ScyllaClusterManager, ks: str):
+    """Snapshot the keyspace, recreate it with tablets and load the snapshot
+    back with load-and-stream. The recreated tables keep their IDs, so the
+    snapshot maps onto them directly."""
+    servers = await manager.running_servers()
+    cql = manager.get_cql()
+    await seed(manager, ks)
+    before = await row_counts(cql, ks)
+    logger.info(f"{ks} rows before the snapshot: {before}")
+    for s in servers:
+        await manager.api.take_snapshot(s.ip_addr, ks, "pre_tablets")
+
+    if ks == "system_distributed":
+        old_ids = await recreate_system_distributed_with_tablets(manager, servers)
+        cql = manager.get_cql()
+    else:
+        old_ids = await drop_and_recreate(manager, servers, ks)
+        trigger = (lambda: asyncio.to_thread(traced_query, cql)) if ks == "system_traces" else (lambda: cql.run_async(f"INSERT INTO {AUDIT_PROBE_KS}.t (pk) VALUES (1)"))
+        await wait_for_tables(manager, ks, trigger=trigger)
+    assert await table_ids(cql, ks) == old_ids
+
+    await restore_from_snapshot(manager, servers, ks, "pre_tablets")
+    assert_no_rows_lost(before, await row_counts(cql, ks))
+    await assert_survives_rolling_restart(manager, servers, ks, old_ids)
