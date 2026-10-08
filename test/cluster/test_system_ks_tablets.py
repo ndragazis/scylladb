@@ -16,7 +16,8 @@ from cassandra import Unauthorized
 from test.cluster.system_ks_tablets_util import (
     SYSTEM_KS_TABLES, maintenance_session, table_ids, keyspace_uses_tablets, tablets_ks_options,
     wait_for_tables, traced_query, audited_statement, read_system_distributed, row_count,
-    assert_survives_rolling_restart, enable_trace_and_audit_probes, AUDIT_PROBE_KS)
+    assert_survives_rolling_restart, enable_trace_and_audit_probes, AUDIT_PROBE_KS,
+    replication_class, repair_on_all_nodes, check_keyspace_works, migrate_to_tablets)
 from test.cluster.util import new_test_keyspace, reconnect_driver
 from test.pylib.scylla_cluster_manager import ScyllaClusterManager
 from test.pylib.util import wait_for
@@ -173,4 +174,59 @@ async def test_drop_recreate_system_distributed(manager: ScyllaClusterManager):
         await wait_for(republished, time.time() + 60)
 
     await assert_survives_rolling_restart(manager, servers, "system_distributed", ids)
+
+
+async def seed(manager: ScyllaClusterManager, ks: str) -> None:
+    """Put some data into `ks` the way Scylla normally does."""
+    cql = manager.get_cql()
+    if ks == "system_traces":
+        for _ in range(5):
+            traced_query(cql)
+    elif ks == "audit":
+        for _ in range(5):
+            await audited_statement(cql)
+    else:
+        # A materialized view gives view_build_status content to serve;
+        # the CDC tables already hold the generation published at bootstrap.
+        await cql.run_async("CREATE KEYSPACE seed_ks WITH replication = {'class': 'NetworkTopologyStrategy', 'replication_factor': 3}")
+        await cql.run_async("CREATE TABLE seed_ks.t (pk int PRIMARY KEY, v int)")
+        await cql.run_async("CREATE MATERIALIZED VIEW seed_ks.mv AS SELECT * FROM seed_ks.t "
+                            "WHERE v IS NOT NULL AND pk IS NOT NULL PRIMARY KEY (v, pk)")
+
+
+async def row_counts(cql, ks: str) -> dict[str, int]:
+    return {t: await row_count(cql, ks, t) for t in sorted(SYSTEM_KS_TABLES[ks])}
+
+
+def assert_no_rows_lost(before: dict[str, int], after: dict[str, int]) -> None:
+    # Scylla keeps writing to these tables during the test, so they may grow.
+    for t, n in before.items():
+        assert after[t] >= n, f"{t}: {n} rows before, {after[t]} after"
+
+
+@pytest.mark.prepare_3_racks_cluster
+@pytest.mark.parametrize("ks", ["system_traces", "audit", "system_distributed"])
+async def test_migrate_system_ks_to_tablets(manager: ScyllaClusterManager, ks: str):
+    """Convert the keyspace to NetworkTopologyStrategy if needed, repair, and
+    run the vnodes-to-tablets migration. The keyspace stays usable while the
+    migration is in progress, and keeps its data and table IDs."""
+    servers = await manager.running_servers()
+    cql = manager.get_cql()
+    await seed(manager, ks)
+    before = await row_counts(cql, ks)
+    old_ids = await table_ids(cql, ks)
+    logger.info(f"{ks} rows before the migration: {before}")
+
+    if await replication_class(cql, ks) != "org.apache.cassandra.locator.NetworkTopologyStrategy":
+        await cql.run_async(f"ALTER KEYSPACE {ks} WITH replication = "
+                            "{'class': 'NetworkTopologyStrategy', 'replication_factor': 3}")
+        await repair_on_all_nodes(manager, servers, ks)
+
+    async def still_works(cql):
+        await check_keyspace_works(cql, ks)
+    cql = await migrate_to_tablets(manager, servers, ks, between_restarts=still_works)
+
+    assert await table_ids(cql, ks) == old_ids
+    assert_no_rows_lost(before, await row_counts(cql, ks))
+    await assert_survives_rolling_restart(manager, servers, ks, old_ids)
 
